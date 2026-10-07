@@ -1,0 +1,176 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@source not "../**/*.md";
+
+/* Native scrollbars are hidden; CustomScrollbar renders the web scrollbar. */
+html {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* =========================
+   THEME ROOT (LIGHT / DARK)
+========================= */
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --section-padding-y: 80px;
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --section-padding-y: 120px;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter); /* Diarahkan ke Inter */
+  --font-mono: var(--font-pixel); /* Diarahkan ke Silkscreen */
+}
+
+/* =========================
+   BASE
+========================= */
+@layer base {
+  body {
+    @apply bg-[var(--background)] text-[var(--foreground)] font-sans;
+  }
+}
+
+/* =========================
+   COMPONENTS
+========================= */
+@layer components {
+  .main-container {
+    @apply mx-auto px-6 md:px-12 lg:px-16 max-w-[1440px] w-full;
+  }
+
+  .section {
+    @apply py-[var(--section-padding-y)];
+  }
+
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(22px) saturate(170%);
+    -webkit-backdrop-filter: blur(22px) saturate(170%);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    box-shadow:
+      0 4px 6px -1px rgb(0 0 0 / 0.1),
+      0 2px 4px -2px rgb(0 0 0 / 0.1);
+  }
+
+  .btn-primary {
+    border-radius: 9999px;
+    background-color: #2563eb;
+    color: white;
+    border: none;
+    box-shadow: 0 4px 14px 0 rgba(37, 99, 235, 0.39);
+    transition: all 0.2s ease;
+  }
+
+  .btn-primary:hover {
+    transform: scale(1.05);
+  }
+
+  .card-textured {
+    background-image: url("/images/card-bg.png");
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+  }
+
+  .font-pixel {
+    font-family: var(--font-pixel), sans-serif;
+  }
+}
+
+/* =========================
+   UTILITIES
+========================= */
+@layer utilities {
+  @keyframes navbar-in {
+    from {
+      opacity: 0;
+      transform: translateY(-16px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-navbar-in {
+    animation: navbar-in 0.6s ease-out both;
+  }
+
+  @keyframes hero-fade-up {
+    from {
+      opacity: 0;
+      transform: translateY(28px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-hero-text-in {
+    animation: hero-fade-up 0.9s ease-out both;
+  }
+
+  .animate-hero-card-in {
+    animation: hero-fade-up 1s ease-out 0.2s both;
+  }
+
+  @keyframes typewriter {
+    from {
+      width: 0;
+    }
+    to {
+      width: 100%;
+    }
+  }
+
+  @keyframes blink-caret {
+    from,
+    to {
+      border-color: transparent;
+    }
+    50% {
+      border-color: currentColor;
+    }
+  }
+
+  .typewriter {
+    display: inline-block;
+    overflow: hidden;
+    white-space: nowrap;
+    border-right: 3px solid currentColor;
+    width: 0;
+    animation:
+      typewriter 2s steps(21, end) forwards,
+      blink-caret 0.75s step-end infinite;
+  }
+
+  @keyframes pan-cloud {
+    from {
+      background-position-x: 0;
+    }
+    to {
+      background-position-x: 1000px;
+    }
+  }
+
+  .animate-pan-cloud {
+    animation: pan-cloud 60s linear infinite;
+  }
+}
