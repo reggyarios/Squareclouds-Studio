@@ -1,40 +1,28 @@
 from pydantic import BaseModel
 from typing import Optional, List
 
-class UserCreate(BaseModel):
+# ==========================================
+# SCHEMA PORTAL KREATOR
+# ==========================================
+
+class UserRegister(BaseModel):
     name: str
     email: str
-    role: str
-    job_title: str 
     password: str
+    job_title: str
 
-class ContentCreate(BaseModel):
-    name: str
-    price: float
-    status: str
-    content_type: str
-
-class SplitCreate(BaseModel):
-    user_id: int
-    content_id: int
-    split_percentage: float
-
-class UserUpdate(BaseModel):
+class UserStatusUpdate(BaseModel):
     name: Optional[str] = None
-    email: Optional[str] = None
-    job_title: Optional[str] = None 
+    job_title: Optional[str] = None
+    account_status: Optional[str] = None  # Active | Inactive
     password: Optional[str] = None
 
-class SplitUpdate(BaseModel):
+class SplitItem(BaseModel):
     user_id: int
-    percentage: float
+    split_percentage: float
 
-class ContentUpdate(BaseModel):
-    name: Optional[str] = None
-    price: Optional[float] = None
-    status: Optional[str] = None
-    content_type: Optional[str] = None
-    splits: Optional[List[SplitUpdate]] = None
+class SplitsReplace(BaseModel):
+    splits: List[SplitItem]
 
 # ==========================================
 # SCHEMA UNTUK CMS LANDING PAGE

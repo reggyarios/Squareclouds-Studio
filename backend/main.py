@@ -4,11 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from jose import JWTError, jwt
-from typing import Dict, List
+from datetime import datetime, timezone
 from pathlib import Path
-import math
 import os
+import re
 import uuid
 import io
 import json
@@ -79,6 +80,13 @@ def get_current_user(
     user = db.query(models.User).filter(models.User.email == email).first()
     if user is None:
         raise credentials_exception
+    # Admin selalu lolos; kreator hanya kalau sudah disetujui dan masih aktif.
+    if user.role != "Admin" and user.account_status != "Active":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Akun belum aktif. Silakan login kembali.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return user
 
 
@@ -257,6 +265,16 @@ def login(
     if not user or not auth.verify_password(form_data.password, user.password):
         raise HTTPException(status_code=401, detail="Email atau password salah")
 
+    if user.role != "Admin" and user.account_status != "Active":
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Akun dinonaktifkan."
+                if user.account_status == "Inactive"
+                else "Akun belum disetujui admin."
+            ),
+        )
+
     access_token = auth.create_access_token(
         data={"sub": user.email, "role": user.role}
     )
@@ -269,36 +287,92 @@ def login(
 
 
 # ============================================================================
-# USERS
+# REGISTER
 # ============================================================================
 
-@app.post("/users/")
-def create_user(
-    user: schemas.UserCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    require_admin(current_user)
-    if db.query(models.User).filter(models.User.email == user.email).first():
+JOB_TITLES = ("Builder", "Skin Artist", "Developer", "Keyart Artist", "Other")
+EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+MIN_PASSWORD_LENGTH = 8
+
+
+@app.post("/register", status_code=status.HTTP_201_CREATED)
+def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
+    name = payload.name.strip()
+    email = payload.email.strip()
+    job_title = payload.job_title.strip()
+
+    if not name or not email or not payload.password or not job_title:
+        raise HTTPException(
+            status_code=400,
+            detail="Nama, email, password, dan job title wajib diisi.",
+        )
+    if not EMAIL_RE.fullmatch(email):
+        raise HTTPException(status_code=400, detail="Format email tidak valid.")
+    if len(payload.password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password minimal {MIN_PASSWORD_LENGTH} karakter.",
+        )
+    if job_title not in JOB_TITLES:
+        raise HTTPException(status_code=400, detail="Job title tidak valid.")
+
+    if (
+        db.query(models.User.id)
+        .filter(func.lower(models.User.email) == email.lower())
+        .first()
+    ):
         raise HTTPException(status_code=400, detail="Email sudah terdaftar!")
 
     try:
         db.add(
             models.User(
-                name=user.name,
-                email=user.email,
-                role=user.role,
-                job_title=user.job_title,
-                password=auth.get_password_hash(user.password),
+                name=name,
+                email=email,
+                role="Creator",
+                job_title=job_title,
+                password=auth.get_password_hash(payload.password),
+                account_status="Pending",
+                created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
         )
         db.commit()
-    except Exception as e:
+    except IntegrityError:
         db.rollback()
-        print(f"Create User Error: {e}")
-        raise HTTPException(status_code=500, detail="Gagal membuat user.")
+        raise HTTPException(status_code=400, detail="Email sudah terdaftar!")
 
-    return {"message": "User berhasil dibuat!"}
+    return {"message": "Pendaftaran diterima. Tunggu persetujuan admin."}
+
+
+# ============================================================================
+# USERS (ADMIN)
+# ============================================================================
+
+USER_STATUS_ORDER = {"Pending": 0, "Active": 1, "Inactive": 2}
+
+
+def serialize_user(u) -> dict:
+    return {
+        "id": u.id,
+        "name": u.name,
+        "email": u.email,
+        "role": u.role,
+        "job_title": u.job_title,
+        "account_status": u.account_status,
+        "created_at": u.created_at,
+    }
+
+
+def get_creator_or_error(db: Session, user_id: int) -> models.User:
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Kreator tidak ditemukan")
+    # 400, bukan 403: frontend menganggap 401/403 sebagai sesi berakhir.
+    if user.role == "Admin":
+        raise HTTPException(
+            status_code=400,
+            detail="Akun Admin tidak bisa diubah dari sini.",
+        )
+    return user
 
 
 @app.get("/users/")
@@ -307,50 +381,68 @@ def get_users(
     current_user: models.User = Depends(get_current_user),
 ):
     require_admin(current_user)
-    users = db.query(
-        models.User.id,
-        models.User.name,
-        models.User.email,
-        models.User.role,
-        models.User.job_title,
-    ).all()
+    users = (
+        db.query(
+            models.User.id,
+            models.User.name,
+            models.User.email,
+            models.User.role,
+            models.User.job_title,
+            models.User.account_status,
+            models.User.created_at,
+        )
+        .filter(models.User.role == "Creator")
+        .all()
+    )
 
-    return {
-        "data": [
-            {
-                "id": u.id,
-                "name": u.name,
-                "email": u.email,
-                "role": u.role,
-                "job_title": u.job_title,
-            }
-            for u in users
-        ]
-    }
+    # Pending dulu, lalu yang terbaru mendaftar. Akun lama tanpa created_at
+    # ditaruh paling bawah di kelompoknya.
+    users.sort(key=lambda u: u.created_at or "", reverse=True)
+    users.sort(key=lambda u: USER_STATUS_ORDER.get(u.account_status, 9))
+
+    return {"data": [serialize_user(u) for u in users]}
 
 
 @app.put("/users/{user_id}")
 def update_user(
     user_id: int,
-    user_update: schemas.UserUpdate,
+    payload: schemas.UserStatusUpdate,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     require_admin(current_user)
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Kreator tidak ditemukan")
+    user = get_creator_or_error(db, user_id)
 
-    for field in ("name", "email", "job_title"):
-        value = getattr(user_update, field)
-        if value:
-            setattr(user, field, value)
+    if payload.name is not None:
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Nama tidak boleh kosong.")
+        user.name = name
 
-    if user_update.password:
-        user.password = auth.get_password_hash(user_update.password)
+    if payload.job_title is not None:
+        if payload.job_title not in JOB_TITLES:
+            raise HTTPException(status_code=400, detail="Job title tidak valid.")
+        user.job_title = payload.job_title
+
+    if payload.account_status is not None:
+        if payload.account_status not in ("Active", "Inactive"):
+            raise HTTPException(
+                status_code=400,
+                detail="Status akun hanya boleh Active atau Inactive.",
+            )
+        user.account_status = payload.account_status
+
+    if payload.password:
+        if len(payload.password) < MIN_PASSWORD_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Password minimal {MIN_PASSWORD_LENGTH} karakter.",
+            )
+        user.password = auth.get_password_hash(payload.password)
 
     db.commit()
-    return {"message": "Data Kreator berhasil diperbarui!"}
+    db.refresh(user)
+    return {"message": "Data kreator diperbarui.", "data": serialize_user(user)}
 
 
 @app.delete("/users/{user_id}")
@@ -360,9 +452,7 @@ def delete_user(
     current_user: models.User = Depends(get_current_user),
 ):
     require_admin(current_user)
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Kreator tidak ditemukan")
+    user = get_creator_or_error(db, user_id)
 
     db.query(models.CreatorSplit).filter(
         models.CreatorSplit.user_id == user_id
@@ -374,40 +464,57 @@ def delete_user(
 
 
 # ============================================================================
-# CONTENTS
+# CONTENTS (READ-ONLY, DIISI pathway_bot.py) & SPLITS
 # ============================================================================
 
-@app.post("/contents/")
-def create_content(
-    content: schemas.ContentCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    require_admin(current_user)
-    existing = (
-        db.query(models.Content)
-        .filter(func.lower(models.Content.name) == content.name.lower())
-        .first()
+MAX_CREATOR_SPLIT_TOTAL = 80.0
+
+
+def serialize_contents(db: Session, content_id: int | None = None) -> list[dict]:
+    query = db.query(models.Content)
+    split_query = db.query(models.CreatorSplit, models.User.name).join(
+        models.User, models.User.id == models.CreatorSplit.user_id
     )
-    if existing:
-        raise HTTPException(status_code=400, detail="Nama konten sudah terdaftar!")
+    units_query = db.query(
+        models.DailySales.content_id,
+        func.coalesce(func.sum(models.DailySales.quantity), 0),
+    )
+    if content_id is not None:
+        query = query.filter(models.Content.id == content_id)
+        split_query = split_query.filter(models.CreatorSplit.content_id == content_id)
+        units_query = units_query.filter(models.DailySales.content_id == content_id)
 
-    try:
-        db.add(
-            models.Content(
-                name=content.name,
-                price=content.price,
-                status=content.status,
-                content_type=content.content_type,
-            )
+    units_by_content = dict(units_query.group_by(models.DailySales.content_id).all())
+
+    splits_by_content = {}
+    for split, user_name in split_query.all():
+        splits_by_content.setdefault(split.content_id, []).append(
+            {
+                "user_id": split.user_id,
+                "user_name": user_name,
+                "split_percentage": split.split_percentage,
+            }
         )
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        print(f"Create Content Error: {e}")
-        raise HTTPException(status_code=500, detail="Gagal membuat konten.")
 
-    return {"message": "Konten berhasil ditambahkan!"}
+    return [
+        {
+            "id": c.id,
+            "name": c.name,
+            "status": c.status,
+            "pack_type": c.pack_type,
+            "world_type": c.world_type,
+            "tier": c.tier,
+            "price": c.price,
+            "release_date": c.release_date,
+            "pathway_status": c.pathway_status,
+            "pathway_product_id": c.pathway_product_id,
+            "pathway_offer_id": c.pathway_offer_id,
+            "last_synced_at": c.last_synced_at,
+            "units_total": int(units_by_content.get(c.id, 0) or 0),
+            "splits": splits_by_content.get(c.id, []),
+        }
+        for c in query.order_by(models.Content.name).all()
+    ]
 
 
 @app.get("/contents/")
@@ -416,80 +523,13 @@ def get_contents(
     current_user: models.User = Depends(get_current_user),
 ):
     require_admin(current_user)
-    contents = db.query(models.Content).all()
-    splits = db.query(models.CreatorSplit).all()
-
-    # O(1) lookup per content instead of one DB query for every content.
-    splits_by_content = {}
-    for s in splits:
-        splits_by_content.setdefault(s.content_id, []).append(s)
-
-    return {
-        "data": [
-            {
-                "id": c.id,
-                "name": c.name,
-                "price": c.price,
-                "status": c.status,
-                "content_type": c.content_type,
-                "splits": [
-                    {"user_id": s.user_id, "percentage": s.split_percentage}
-                    for s in splits_by_content.get(c.id, [])
-                ],
-            }
-            for c in contents
-        ]
-    }
+    return {"data": serialize_contents(db)}
 
 
-@app.post("/splits/")
-def create_split(
-    split: schemas.SplitCreate,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    require_admin(current_user)
-    existing = (
-        db.query(models.CreatorSplit)
-        .filter(
-            models.CreatorSplit.user_id == split.user_id,
-            models.CreatorSplit.content_id == split.content_id,
-        )
-        .first()
-    )
-    if existing:
-        raise HTTPException(
-            status_code=400,
-            detail="Creator split untuk konten ini sudah ada.",
-        )
-
-    if split.split_percentage <= 0 or split.split_percentage > 100:
-        raise HTTPException(
-            status_code=400,
-            detail="Persentase split harus antara 0 dan 100.",
-        )
-
-    try:
-        db.add(
-            models.CreatorSplit(
-                user_id=split.user_id,
-                content_id=split.content_id,
-                split_percentage=split.split_percentage,
-            )
-        )
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        print(f"Create Split Error: {e}")
-        raise HTTPException(status_code=500, detail="Gagal mengatur creator split.")
-
-    return {"message": "Split royalti berhasil diatur!"}
-
-
-@app.put("/contents/{content_id}")
-def update_content(
+@app.put("/contents/{content_id}/splits")
+def replace_content_splits(
     content_id: int,
-    content_update: schemas.ContentUpdate,
+    payload: schemas.SplitsReplace,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
@@ -498,137 +538,67 @@ def update_content(
     if not content:
         raise HTTPException(status_code=404, detail="Content tidak ditemukan")
 
-    for field in ("name", "status", "content_type"):
-        value = getattr(content_update, field)
-        if value:
-            setattr(content, field, value)
+    user_ids = [s.user_id for s in payload.splits]
+    if len(user_ids) != len(set(user_ids)):
+        raise HTTPException(status_code=400, detail="Kreator tidak boleh duplikat.")
 
-    if content_update.price is not None:
-        content.price = content_update.price
+    if any(s.split_percentage <= 0 for s in payload.splits):
+        raise HTTPException(
+            status_code=400,
+            detail="Persentase split tiap kreator harus lebih dari 0.",
+        )
 
-    if content_update.splits is not None:
+    total = sum(s.split_percentage for s in payload.splits)
+    if round(total, 6) > MAX_CREATOR_SPLIT_TOTAL:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Total split kreator maksimal {MAX_CREATOR_SPLIT_TOTAL:g}% "
+                f"(sekarang {total:g}%)."
+            ),
+        )
+
+    if user_ids:
+        active_ids = {
+            uid
+            for (uid,) in db.query(models.User.id).filter(
+                models.User.id.in_(user_ids),
+                models.User.role == "Creator",
+                models.User.account_status == "Active",
+            )
+        }
+        invalid = [uid for uid in user_ids if uid not in active_ids]
+        if invalid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Split hanya untuk kreator berstatus Active. "
+                    f"User ID tidak valid: {', '.join(map(str, invalid))}."
+                ),
+            )
+
+    try:
         db.query(models.CreatorSplit).filter(
             models.CreatorSplit.content_id == content_id
         ).delete()
-
         db.add_all(
             models.CreatorSplit(
                 user_id=s.user_id,
                 content_id=content_id,
-                split_percentage=s.percentage,
+                split_percentage=s.split_percentage,
             )
-            for s in content_update.splits
-            if s.user_id and s.percentage > 0
+            for s in payload.splits
         )
-
-    db.commit()
-    return {"message": "Data Konten & Split diperbarui!"}
-
-
-@app.delete("/contents/{content_id}")
-def delete_content(
-    content_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    require_admin(current_user)
-    content = db.query(models.Content).filter(models.Content.id == content_id).first()
-    if not content:
-        raise HTTPException(status_code=404, detail="Content tidak ditemukan")
-
-    db.query(models.CreatorSplit).filter(
-        models.CreatorSplit.content_id == content_id
-    ).delete()
-    db.query(models.DailySales).filter(
-        models.DailySales.content_id == content_id
-    ).delete()
-    db.delete(content)
-    db.commit()
-
-    return {"message": "Konten dihapus permanen!"}
-
-
-# ============================================================================
-# PATHWAY SYNC
-# ============================================================================
-
-@app.post("/sync-pathway-daily/")
-def sync_pathway_daily(
-    payload: List[Dict],
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    require_admin(current_user)
-    synced_count = 0
-
-    try:
-        # Cache content by lowercase name. This removes repeated SELECTs when
-        # Pathway sends several records for the same content.
-        content_cache = {
-            name.lower(): content
-            for name, content in (
-                db.query(models.Content.name, models.Content)
-                .all()
-            )
-        }
-
-        # Cache existing sales by (date, content_id).
-        sales_cache = {
-            (sale.date, sale.content_id): sale
-            for sale in db.query(models.DailySales).all()
-        }
-
-        for item in payload:
-            content_name = item.get("productName")
-            raw_units = int(item.get("totalUnits", 0))
-            date_val = item.get("date")
-
-            if not content_name or raw_units == 0 or not date_val:
-                continue
-
-            # Unit disimpan apa adanya (sesuai laporan Pathway/Microsoft).
-            adjusted_units = raw_units
-
-            key = content_name.lower()
-            content = content_cache.get(key)
-
-            if not content:
-                content = models.Content(
-                    name=content_name,
-                    price=0.0,
-                    status="Development",
-                    content_type="Other",
-                )
-                db.add(content)
-                db.flush()
-                content_cache[key] = content
-
-            sale_key = (date_val, content.id)
-            existing = sales_cache.get(sale_key)
-
-            if existing:
-                existing.quantity = adjusted_units
-            else:
-                existing = models.DailySales(
-                    date=date_val,
-                    content_id=content.id,
-                    quantity=adjusted_units,
-                )
-                db.add(existing)
-                sales_cache[sale_key] = existing
-
-            synced_count += 1
-
         db.commit()
     except Exception as e:
         db.rollback()
-        print(f"Pathway Sync Error: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Sync gagal. Tidak ada perubahan yang disimpan.",
-        )
+        print(f"Replace Splits Error: {e}")
+        raise HTTPException(status_code=500, detail="Gagal menyimpan split.")
 
-    return {"message": "Sync Berhasil!", "synced_count": synced_count}
+    return {
+        "message": "Split konten diperbarui.",
+        "data": serialize_contents(db, content_id)[0],
+    }
 
 
 # ============================================================================
@@ -745,7 +715,13 @@ def get_creator_dashboard(
         .all()
     )
     proyek_aktif = [
-        {"name": content.name, "status": content.status}
+        {
+            "name": content.name,
+            "status": content.status,
+            "pack_type": content.pack_type,
+            "release_date": content.release_date,
+            "tier": content.tier,
+        }
         for _, content in projects
     ]
 
