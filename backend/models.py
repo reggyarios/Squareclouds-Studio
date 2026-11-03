@@ -69,6 +69,42 @@ class User(Base):
 
 
 # ============================================================
+# INVITATION
+# ============================================================
+
+class Invitation(Base):
+    __tablename__ = "invitations"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Disimpan lowercase
+    email = Column(String, nullable=False, index=True)
+
+    # secrets.token_urlsafe(32)
+    token = Column(
+        String,
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+
+    invited_by = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+
+    # ISO timestamp UTC
+    created_at = Column(String, nullable=False)
+
+    # created_at + 7 hari
+    expires_at = Column(String, nullable=False)
+
+    # Diisi saat kreator selesai mendaftar
+    used_at = Column(String, nullable=True)
+
+
+# ============================================================
 # CONTENT
 # ============================================================
 
