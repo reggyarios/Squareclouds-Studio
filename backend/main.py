@@ -87,9 +87,18 @@ def require_admin(user):
         raise HTTPException(status_code=403, detail="Akses ditolak.")
 
 
+# Origin yang boleh memanggil API dari browser. Tambahkan lewat
+# CORS_EXTRA_ORIGINS di .env (dipisah koma) kalau perlu, mis. untuk dev lokal.
+ALLOWED_ORIGINS = [
+    "https://squarecloudsmc.com",
+    "https://www.squarecloudsmc.com",
+    "https://access.squarecloudsmc.com",
+    "https://creator.squarecloudsmc.com",
+] + [o.strip() for o in os.getenv("CORS_EXTRA_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
