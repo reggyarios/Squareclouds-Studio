@@ -87,23 +87,37 @@ export default function AdminDashboard() {
     router.push("/login");
   };
 
+  // Semua endpoint admin sekarang wajib membawa token.
+  const authHeaders = (extra: Record<string, string> = {}) => ({
+    ...extra,
+    Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
+  });
+
+  // Token kadaluarsa / ditolak -> paksa login ulang.
+  const guard = (res: Response) => {
+    if (res.status === 401 || res.status === 403) {
+      handleLogout();
+      throw new Error("Sesi berakhir, silakan login ulang.");
+    }
+    return res;
+  };
+
   const fetchUsers = async () => {
-    const res = await fetch("https://api.squarecloudsmc.com/users/");
+    const res = guard(await fetch("https://api.squarecloudsmc.com/users/", { headers: authHeaders() }));
     const data = await res.json();
     setUsersList(data.data.filter((u: any) => u.role === "Creator"));
   };
 
   const fetchContents = async () => {
-    const res = await fetch("https://api.squarecloudsmc.com/contents/");
+    const res = guard(await fetch("https://api.squarecloudsmc.com/contents/", { headers: authHeaders() }));
     const data = await res.json();
     setContentsList(data.data);
   };
 
   const fetchReports = async () => {
-    const token = localStorage.getItem("token");
-    const res = await fetch("https://api.squarecloudsmc.com/admin-reports/", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = guard(
+      await fetch("https://api.squarecloudsmc.com/admin-reports/", { headers: authHeaders() })
+    );
     const data = await res.json();
     if (res.ok) {
       setReportsList(data.data);
@@ -119,11 +133,11 @@ export default function AdminDashboard() {
     setIsProcessing(true);
     setPesan({ type: "", text: "" });
     try {
-      const res = await fetch("https://api.squarecloudsmc.com/users/", {
+      const res = guard(await fetch("https://api.squarecloudsmc.com/users/", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ ...formKreator, role: "Creator" }),
-      });
+      }));
       if (!res.ok) throw new Error("Gagal membuat kreator");
       setPesan({ type: "success", text: "Akun Kreator berhasil dibuat!" });
       setFormKreator({ name: "", email: "", job_title: JOB_OPTIONS[0], password: "" });
@@ -158,25 +172,25 @@ export default function AdminDashboard() {
     }
 
     try {
-      const resKonten = await fetch("https://api.squarecloudsmc.com/contents/", {
+      const resKonten = guard(await fetch("https://api.squarecloudsmc.com/contents/", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(formKonten),
-      });
+      }));
       const dataKonten = await resKonten.json();
       if (!resKonten.ok) throw new Error("Gagal membuat konten");
 
       for (const split of formSplits) {
         if (split.user_id && split.percentage > 0) {
-          await fetch("https://api.squarecloudsmc.com/splits/", {
+          guard(await fetch("https://api.squarecloudsmc.com/splits/", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: authHeaders({ "Content-Type": "application/json" }),
             body: JSON.stringify({
               user_id: Number(split.user_id),
               content_id: dataKonten.data.id,
               split_percentage: Number(split.percentage),
             }),
-          });
+          }));
         }
       }
       setPesan({ type: "success", text: "Konten dan Split berhasil disimpan!" });
@@ -199,16 +213,16 @@ export default function AdminDashboard() {
     e.preventDefault();
     setIsProcessing(true);
     try {
-      const res = await fetch(`https://api.squarecloudsmc.com/users/${editingUser.id}`, {
+      const res = guard(await fetch(`https://api.squarecloudsmc.com/users/${editingUser.id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           name: editingUser.name,
           email: editingUser.email,
           job_title: editingUser.job_title,
           password: editingUser.newPassword || undefined,
         }),
-      });
+      }));
       if (!res.ok) throw new Error("Gagal update");
       setPesan({ type: "success", text: "Data kreator diupdate!" });
       setEditingUser(null);
@@ -221,7 +235,7 @@ export default function AdminDashboard() {
 
   const handleDeleteUser = async (id: number) => {
     if (!confirm("Hapus kreator ini permanen?")) return;
-    await fetch(`https://api.squarecloudsmc.com/users/${id}`, { method: "DELETE" });
+    guard(await fetch(`https://api.squarecloudsmc.com/users/${id}`, { method: "DELETE", headers: authHeaders() }));
     fetchUsers();
   };
 
@@ -238,9 +252,9 @@ export default function AdminDashboard() {
       return;
     }
     try {
-      await fetch(`https://api.squarecloudsmc.com/contents/${editingContent.id}`, {
+      guard(await fetch(`https://api.squarecloudsmc.com/contents/${editingContent.id}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           name: editingContent.name,
           price: editingContent.price,
@@ -248,7 +262,7 @@ export default function AdminDashboard() {
           content_type: editingContent.content_type,
           splits: editingContent.splits,
         }),
-      });
+      }));
       setPesan({ type: "success", text: "Data konten diupdate!" });
       setEditingContent(null);
       fetchContents();
@@ -260,7 +274,7 @@ export default function AdminDashboard() {
 
   const handleDeleteContent = async (id: number) => {
     if (!confirm("Hapus konten permanen?")) return;
-    await fetch(`https://api.squarecloudsmc.com/contents/${id}`, { method: "DELETE" });
+    guard(await fetch(`https://api.squarecloudsmc.com/contents/${id}`, { method: "DELETE", headers: authHeaders() }));
     fetchContents();
     fetchReports();
   };

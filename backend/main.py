@@ -264,7 +264,12 @@ def login(
 # ============================================================================
 
 @app.post("/users/")
-def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+def create_user(
+    user: schemas.UserCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
     if db.query(models.User).filter(models.User.email == user.email).first():
         raise HTTPException(status_code=400, detail="Email sudah terdaftar!")
 
@@ -288,7 +293,11 @@ def create_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/users/")
-def get_users(db: Session = Depends(get_db)):
+def get_users(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
     users = db.query(
         models.User.id,
         models.User.name,
@@ -316,7 +325,9 @@ def update_user(
     user_id: int,
     user_update: schemas.UserUpdate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+    require_admin(current_user)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Kreator tidak ditemukan")
@@ -334,7 +345,12 @@ def update_user(
 
 
 @app.delete("/users/{user_id}")
-def delete_user(user_id: int, db: Session = Depends(get_db)):
+def delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Kreator tidak ditemukan")
@@ -353,7 +369,12 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
 # ============================================================================
 
 @app.post("/contents/")
-def create_content(content: schemas.ContentCreate, db: Session = Depends(get_db)):
+def create_content(
+    content: schemas.ContentCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
     existing = (
         db.query(models.Content)
         .filter(func.lower(models.Content.name) == content.name.lower())
@@ -381,7 +402,11 @@ def create_content(content: schemas.ContentCreate, db: Session = Depends(get_db)
 
 
 @app.get("/contents/")
-def get_contents(db: Session = Depends(get_db)):
+def get_contents(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
     contents = db.query(models.Content).all()
     splits = db.query(models.CreatorSplit).all()
 
@@ -409,7 +434,12 @@ def get_contents(db: Session = Depends(get_db)):
 
 
 @app.post("/splits/")
-def create_split(split: schemas.SplitCreate, db: Session = Depends(get_db)):
+def create_split(
+    split: schemas.SplitCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
     existing = (
         db.query(models.CreatorSplit)
         .filter(
@@ -452,7 +482,9 @@ def update_content(
     content_id: int,
     content_update: schemas.ContentUpdate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
 ):
+    require_admin(current_user)
     content = db.query(models.Content).filter(models.Content.id == content_id).first()
     if not content:
         raise HTTPException(status_code=404, detail="Content tidak ditemukan")
@@ -485,7 +517,12 @@ def update_content(
 
 
 @app.delete("/contents/{content_id}")
-def delete_content(content_id: int, db: Session = Depends(get_db)):
+def delete_content(
+    content_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
     content = db.query(models.Content).filter(models.Content.id == content_id).first()
     if not content:
         raise HTTPException(status_code=404, detail="Content tidak ditemukan")
