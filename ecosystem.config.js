@@ -1,25 +1,24 @@
 module.exports = {
   apps: [
     {
-      name: "backend",
-      script: "/www/server/pyporject_evn/backend_venv/bin/uvicorn",
-      args: "main:app --host 127.0.0.1 --port 8000",
-      cwd: "/www/wwwroot/squarecloudsmc.com/backend",
+      name: "squareclouds-api",
+      cwd: "/var/www/squareclouds-studio/backend",
+      script: "venv/bin/python",
+      args: "-m uvicorn main:app --host 127.0.0.1 --port 8000",
       interpreter: "none",
       autorestart: true,
-      watch: false
+      watch: false,
+      max_memory_restart: "500M",
     },
     {
-      name: "frontend",
-      script: "npm",
-      args: "start",
-      cwd: "/www/wwwroot/squarecloudsmc.com/frontend",
-      env: {
-        PORT: 3000,
-        NEXT_PUBLIC_API_URL:"https://api.squarecloudsmc.com"
-      },
+      name: "squareclouds-frontend",
+      cwd: "/var/www/squareclouds-studio/frontend",
+      script: "node_modules/.bin/next",
+      args: "start -p 3000",
+      interpreter: "none",
       autorestart: true,
-      watch: false
-    }
-  ]
+      watch: false,
+      env: { NODE_ENV: "production" },
+    },
+  ],
 };
