@@ -157,9 +157,12 @@ def scrape_offers(page) -> list[dict]:
                     return i
             return None
 
-        c_status, c_title = col("STATUS"), col("TITLE")
-        c_pack, c_tier = col("PACK"), col("TIER")
+        c_status = col("STATUS")
+        c_title = col("TITLE") if col("TITLE") is not None else col("NAME")
+        c_pack = col("PACK") if col("PACK") is not None else col("TYPE")
+        c_tier = col("TIER")
         c_by, c_date = col("CREATED BY"), col("CREATED DATE")
+        c_rel = col("RELEASE")
 
         for r in range(n):
             row = rows.nth(r)
@@ -184,7 +187,15 @@ def scrape_offers(page) -> list[dict]:
                 m = re.search(r"/offers/([^/?#]+)", href)
                 offer_id = m.group(1) if m else None
 
+            release = None
+            if c_rel is not None:
+                t = cells.nth(c_rel).locator("time")
+                if t.count():
+                    dt = t.first.get_attribute("datetime") or ""
+                    release = dt[:10] or None
+
             offers.append({
+                "release_date": release,
                 "title": title_lines[0],
                 "with": title_lines[1] if len(title_lines) > 1 else None,
                 "tab": tab,
@@ -392,6 +403,8 @@ def upsert(offers: list[dict], catalog: list[dict], per_product: dict[str, list[
                 c.world_type = cat.get("worldType")
                 rd = cat.get("releaseDate")
                 c.release_date = rd[:10] if rd else None
+            if o.get("release_date") and not c.release_date:
+                c.release_date = o["release_date"]
             if (c.price or 0) == 0 and o["tier"] in TIER_PRICE:
                 c.price = TIER_PRICE[o["tier"]]
             c.last_synced_at = now
@@ -418,6 +431,8 @@ def upsert(offers: list[dict], catalog: list[dict], per_product: dict[str, list[
             tot_gross = sum(d.get("gross", 0) for d in days)
             if tot_units:
                 c.price = round(tot_gross / tot_units, 2)
+                if not c.tier:
+                    c.tier = min(TIER_PRICE, key=lambda t: abs(TIER_PRICE[t] - c.price))
             for d in days:
                 units = int(d.get("units", 0))
                 key = (d["date"], c.id)
