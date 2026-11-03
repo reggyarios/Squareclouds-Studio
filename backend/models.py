@@ -42,6 +42,18 @@ class User(Base):
         nullable=False,
     )
 
+    # Pending | Active | Inactive. Kreator baru mendaftar sebagai Pending dan
+    # baru bisa login setelah disetujui admin.
+    account_status = Column(
+        String,
+        nullable=False,
+        default="Pending",
+        server_default="Pending",
+    )
+
+    # ISO timestamp UTC saat daftar
+    created_at = Column(String, nullable=True)
+
     # Relationships
     splits = relationship(
         "CreatorSplit",
