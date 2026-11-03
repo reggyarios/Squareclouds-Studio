@@ -89,6 +89,25 @@ class Content(Base):
         nullable=True,
     )
 
+    # ---- Data dari Pathway (diisi otomatis oleh pathway_bot.py) ----
+    # productID dari halaman Sales. Kunci utama pencocokan konten.
+    pathway_product_id = Column(String, unique=True, nullable=True, index=True)
+    # ID offer dari URL /dashboard/offers/<id> (kalau tersedia).
+    pathway_offer_id = Column(String, unique=True, nullable=True, index=True)
+    # Status mentah di tab Offers: In Development / Review / Submissions /
+    # Pending Release / Published.
+    pathway_status = Column(String, nullable=True)
+    # "World", "Skin Pack", "World + Skin Pack", ...
+    pack_type = Column(String, nullable=True)
+    # "Survival Spawn", ... (hanya untuk World)
+    world_type = Column(String, nullable=True)
+    # Royalty tier (1..19)
+    tier = Column(Integer, nullable=True)
+    # YYYY-MM-DD
+    release_date = Column(String, nullable=True)
+    # ISO timestamp sinkronisasi terakhir
+    last_synced_at = Column(String, nullable=True)
+
     # Relationships
     splits = relationship(
         "CreatorSplit",

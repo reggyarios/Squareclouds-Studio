@@ -586,9 +586,8 @@ def sync_pathway_daily(
             if not content_name or raw_units == 0 or not date_val:
                 continue
 
-            adjusted_units = math.floor(raw_units * 0.5)
-            if adjusted_units <= 0:
-                continue
+            # Unit disimpan apa adanya (sesuai laporan Pathway/Microsoft).
+            adjusted_units = raw_units
 
             key = content_name.lower()
             content = content_cache.get(key)
