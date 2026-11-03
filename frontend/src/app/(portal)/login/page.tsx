@@ -1,8 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiUrl } from "@/lib/api";
+
+const noopSubscribe = () => () => {};
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -10,6 +13,12 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
+  // Pendaftaran hanya untuk portal kreator, bukan login admin-cms.
+  const showRegisterLink = useSyncExternalStore(
+    noopSubscribe,
+    () => window.location.hostname.toLowerCase() !== "access.squarecloudsmc.com",
+    () => false
+  );
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,6 +39,11 @@ export default function LoginPage() {
       });
 
       const data = await res.json();
+
+      // 403 = akun Pending / Inactive. Tampilkan pesan server apa adanya.
+      if (res.status === 403) {
+        throw new Error(data.detail || "Akun belum aktif.");
+      }
 
       if (!res.ok) {
         throw new Error(data.detail || "Gagal login. Periksa email dan password.");
@@ -101,6 +115,15 @@ export default function LoginPage() {
             </button>
           </div>
         </form>
+
+        {showRegisterLink && (
+          <p className="text-center text-sm text-gray-500">
+            Belum punya akun?{" "}
+            <Link href="/register" className="font-medium text-blue-600 hover:text-blue-700">
+              Daftar
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   );

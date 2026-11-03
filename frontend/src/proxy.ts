@@ -17,7 +17,7 @@ export function proxy(req: NextRequest) {
       return NextResponse.rewrite(url);
     }
 
-    if (["/login", "/admin", "/creator"].includes(url.pathname)) {
+    if (["/login", "/register", "/admin", "/creator"].includes(url.pathname)) {
       return NextResponse.next();
     }
 
@@ -38,7 +38,7 @@ export function proxy(req: NextRequest) {
       return NextResponse.next();
     }
 
-    if (["/admin", "/creator"].includes(url.pathname)) {
+    if (["/admin", "/creator", "/register"].includes(url.pathname)) {
       return redirectTo("access.squarecloudsmc.com", "/login");
     }
 
@@ -47,7 +47,7 @@ export function proxy(req: NextRequest) {
 
   if (
     (hostname === "squarecloudsmc.com" || hostname === "www.squarecloudsmc.com") &&
-    ["/login", "/admin", "/creator", "/admin-cms"].includes(url.pathname)
+    ["/login", "/register", "/admin", "/creator", "/admin-cms"].includes(url.pathname)
   ) {
     return redirectTo(hostname, "/");
   }

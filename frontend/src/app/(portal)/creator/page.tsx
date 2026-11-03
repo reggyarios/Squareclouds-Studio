@@ -12,6 +12,8 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
+import { apiUrl } from "@/lib/api";
+import { authHeaders } from "@/lib/auth";
 
 export default function CreatorDashboard() {
   const router = useRouter();
@@ -23,8 +25,8 @@ export default function CreatorDashboard() {
     const token = localStorage.getItem("token");
     if (!token) return router.push("/login");
 
-    fetch("https://api.squarecloudsmc.com/creator-dashboard/", {
-      headers: { Authorization: `Bearer ${token}` },
+    fetch(apiUrl("/creator-dashboard/"), {
+      headers: authHeaders(),
     })
       .then((res) => {
         if (!res.ok) throw new Error("Gagal");
@@ -180,7 +182,16 @@ export default function CreatorDashboard() {
                     key={idx}
                     className="flex justify-between items-center bg-gray-50 p-3 rounded-xl border border-gray-100"
                   >
-                    <span className="font-bold text-gray-700 text-sm">{p.name}</span>
+                    <div className="min-w-0">
+                      <span className="font-bold text-gray-700 text-sm">{p.name}</span>
+                      {(p.pack_type || p.release_date) && (
+                        <p className="text-[11px] font-medium text-gray-400">
+                          {[p.pack_type, p.release_date && `Rilis ${p.release_date}`]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </p>
+                      )}
+                    </div>
                     <span
                       className={`px-2 py-1 rounded text-[10px] font-black uppercase tracking-wider ${p.status === "Published" ? "bg-green-100 text-green-600" : "bg-amber-100 text-amber-700"}`}
                     >

@@ -1,122 +1,131 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { apiErrorMessage, apiUrl } from "@/lib/api";
+import { authHeaders, guard } from "@/lib/auth";
+import { JOB_OPTIONS } from "@/lib/portal";
 
-const STATUS_OPTIONS = ["Development", "Packaging", "MS Review", "Ingestion", "Published"];
-const TYPE_OPTIONS = [
-  "Survival Spawn",
-  "Skin Pack",
-  "Adventure Map",
-  "Add-On",
-  "Mash-Up",
-  "Mini Game",
-];
-const JOB_OPTIONS = ["Builder", "Skin Artist", "Developer", "Keyart Artist", "Other"];
-const TIER_OPTIONS = [
-  { tier: 1, price: 0.37 },
-  { tier: 2, price: 0.74 },
-  { tier: 3, price: 1.12 },
-  { tier: 4, price: 1.49 },
-  { tier: 5, price: 1.87 },
-  { tier: 6, price: 2.24 },
-  { tier: 7, price: 2.62 },
-  { tier: 8, price: 2.99 },
-  { tier: 9, price: 3.37 },
-  { tier: 10, price: 3.74 },
-  { tier: 11, price: 4.12 },
-  { tier: 12, price: 4.49 },
-  { tier: 13, price: 4.87 },
-  { tier: 14, price: 5.24 },
-  { tier: 15, price: 5.62 },
-  { tier: 16, price: 5.99 },
-  { tier: 17, price: 6.37 },
-  { tier: 18, price: 6.74 },
-  { tier: 19, price: 7.12 },
-];
+type Tab = "pendaftar" | "kreator" | "konten" | "laporan";
+
+type Creator = {
+  id: number;
+  name: string;
+  email: string;
+  role: string;
+  job_title: string | null;
+  account_status: "Pending" | "Active" | "Inactive";
+  created_at: string | null;
+};
+
+type ContentSplit = { user_id: number; user_name: string; split_percentage: number };
+
+type Content = {
+  id: number;
+  name: string;
+  status: string | null;
+  pack_type: string | null;
+  world_type: string | null;
+  tier: number | null;
+  price: number | null;
+  release_date: string | null;
+  pathway_status: string | null;
+  last_synced_at: string | null;
+  units_total: number;
+  splits: ContentSplit[];
+};
+
+type SplitRow = { user_id: number; name: string; checked: boolean; percentage: string };
+
+const MAX_CREATOR_SPLIT = 80;
+const MIN_PASSWORD_LENGTH = 8;
+
+const STATUS_BADGE: Record<string, string> = {
+  Published: "bg-green-100 text-green-700",
+  "Pending Release": "bg-amber-100 text-amber-700",
+  Submissions: "bg-amber-100 text-amber-700",
+  "In Development": "bg-gray-100 text-gray-600",
+  Review: "bg-gray-100 text-gray-600",
+};
+
+const errMsg = (err: unknown) => (err instanceof Error ? err.message : "Terjadi kesalahan.");
+
+const formatDate = (value: string | null) => {
+  if (!value) return "-";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime())
+    ? value
+    : d.toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+};
+
+const formatDateTime = (value: string | null) => {
+  if (!value) return "-";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime())
+    ? value
+    : d.toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" });
+};
+
+const roundPct = (n: number) => Math.round(n * 1e6) / 1e6;
 
 export default function AdminDashboard() {
   const router = useRouter();
   const [adminName, setAdminName] = useState("");
-  const [activeTab, setActiveTab] = useState("laporan");
+  const [activeTab, setActiveTab] = useState<Tab>("pendaftar");
   const [loading, setLoading] = useState(true);
 
-  const [usersList, setUsersList] = useState<any[]>([]);
-  const [contentsList, setContentsList] = useState<any[]>([]);
+  const [usersList, setUsersList] = useState<Creator[]>([]);
+  const [contentsList, setContentsList] = useState<Content[]>([]);
   const [reportsList, setReportsList] = useState<any[]>([]);
 
   // State untuk filter bulan laporan
   const [filterBulan, setFilterBulan] = useState<string>("");
 
   const [pesan, setPesan] = useState({ type: "", text: "" });
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
 
-  const [formKreator, setFormKreator] = useState({
-    name: "",
-    email: "",
-    job_title: JOB_OPTIONS[0],
-    password: "",
-  });
-  const [formKonten, setFormKonten] = useState({
-    name: "",
-    price: TIER_OPTIONS[0].price,
-    status: STATUS_OPTIONS[0],
-    content_type: TYPE_OPTIONS[0],
-  });
+  const [splitEditor, setSplitEditor] = useState<{ content: Content; rows: SplitRow[] } | null>(
+    null
+  );
+  const [savingSplits, setSavingSplits] = useState(false);
+  const [splitError, setSplitError] = useState("");
 
-  // formSplits sekarang default kosong agar Squareclouds bisa 100% jika tidak ada kreator ditambahkan
-  const [formSplits, setFormSplits] = useState<{ user_id: string; percentage: number }[]>([]);
+  const [resetUser, setResetUser] = useState<Creator | null>(null);
+  const [newPassword, setNewPassword] = useState("");
+  const [resetError, setResetError] = useState("");
 
-  const [editingUser, setEditingUser] = useState<any>(null);
-  const [editingContent, setEditingContent] = useState<any>(null);
-
-  useEffect(() => {
-    const token = localStorage.getItem("token");
-    const role = localStorage.getItem("role");
-    if (!token || role !== "Admin") return router.push("/login");
-
-    setAdminName(localStorage.getItem("name") || "Admin");
-    fetchUsers();
-    fetchContents();
-    fetchReports();
-    setLoading(false);
-  }, [router]);
-
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     localStorage.clear();
     router.push("/login");
-  };
+  }, [router]);
 
-  // Semua endpoint admin sekarang wajib membawa token.
-  const authHeaders = (extra: Record<string, string> = {}) => ({
-    ...extra,
-    Authorization: `Bearer ${localStorage.getItem("token") ?? ""}`,
-  });
-
-  // Token kadaluarsa / ditolak -> paksa login ulang.
-  const guard = (res: Response) => {
-    if (res.status === 401 || res.status === 403) {
-      handleLogout();
-      throw new Error("Sesi berakhir, silakan login ulang.");
-    }
-    return res;
-  };
+  // Semua endpoint admin wajib membawa token. 401/403 -> login ulang,
+  // error lain -> Error berisi `detail` dari server.
+  const api = useCallback(
+    async (path: string, init: RequestInit = {}) => {
+      const headers = authHeaders(init.body ? { "Content-Type": "application/json" } : {});
+      const res = guard(await fetch(apiUrl(path), { ...init, headers }), handleLogout);
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(apiErrorMessage(data, `Permintaan gagal (${res.status}).`));
+      return data;
+    },
+    [handleLogout]
+  );
 
   const fetchUsers = async () => {
-    const res = guard(await fetch("https://api.squarecloudsmc.com/users/", { headers: authHeaders() }));
-    const data = await res.json();
-    setUsersList(data.data.filter((u: any) => u.role === "Creator"));
+    const data = await api("/users/");
+    setUsersList(data.data);
   };
 
   const fetchContents = async () => {
-    const res = guard(await fetch("https://api.squarecloudsmc.com/contents/", { headers: authHeaders() }));
-    const data = await res.json();
+    const data = await api("/contents/");
     setContentsList(data.data);
   };
 
   const fetchReports = async () => {
     const res = guard(
-      await fetch("https://api.squarecloudsmc.com/admin-reports/", { headers: authHeaders() })
+      await fetch(apiUrl("/admin-reports/"), { headers: authHeaders() }),
+      handleLogout
     );
     const data = await res.json();
     if (res.ok) {
@@ -128,156 +137,199 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleSubmitKreator = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsProcessing(true);
-    setPesan({ type: "", text: "" });
-    try {
-      const res = guard(await fetch("https://api.squarecloudsmc.com/users/", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ ...formKreator, role: "Creator" }),
-      }));
-      if (!res.ok) throw new Error("Gagal membuat kreator");
-      setPesan({ type: "success", text: "Akun Kreator berhasil dibuat!" });
-      setFormKreator({ name: "", email: "", job_title: JOB_OPTIONS[0], password: "" });
-      fetchUsers();
-    } catch (err: any) {
-      setPesan({ type: "error", text: err.message });
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const handleAddSplitRow = () => {
-    const currentTotal = formSplits.reduce((sum, item) => sum + Number(item.percentage), 0);
-    const sisa = 80 - currentTotal;
-    if (sisa <= 0) return alert("Batas alokasi kreator (80%) sudah penuh.");
-    setFormSplits([...formSplits, { user_id: "", percentage: sisa }]);
-  };
-
-  const handleSubmitKonten = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsProcessing(true);
-    setPesan({ type: "", text: "" });
-
-    const totalPersen = formSplits.reduce((acc, curr) => acc + Number(curr.percentage), 0);
-    if (totalPersen > 80) {
-      setPesan({
-        type: "error",
-        text: "Total persentase kreator tidak boleh lebih dari 80% (Squareclouds memiliki minimal 20%).",
-      });
-      setIsProcessing(false);
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    const role = localStorage.getItem("role");
+    if (!token || role !== "Admin") {
+      router.push("/login");
       return;
     }
 
-    try {
-      const resKonten = guard(await fetch("https://api.squarecloudsmc.com/contents/", {
-        method: "POST",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(formKonten),
-      }));
-      const dataKonten = await resKonten.json();
-      if (!resKonten.ok) throw new Error("Gagal membuat konten");
+    setAdminName(localStorage.getItem("name") || "Admin");
+    Promise.all([fetchUsers(), fetchContents(), fetchReports()])
+      .catch((err) => setPesan({ type: "error", text: errMsg(err) }))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router]);
 
-      for (const split of formSplits) {
-        if (split.user_id && split.percentage > 0) {
-          guard(await fetch("https://api.squarecloudsmc.com/splits/", {
-            method: "POST",
-            headers: authHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({
-              user_id: Number(split.user_id),
-              content_id: dataKonten.data.id,
-              split_percentage: Number(split.percentage),
-            }),
-          }));
-        }
-      }
-      setPesan({ type: "success", text: "Konten dan Split berhasil disimpan!" });
-      setFormKonten({
-        name: "",
-        price: TIER_OPTIONS[0].price,
-        status: STATUS_OPTIONS[0],
-        content_type: TYPE_OPTIONS[0],
-      });
-      setFormSplits([]);
-      fetchContents();
-    } catch (err: any) {
-      setPesan({ type: "error", text: err.message });
-    } finally {
-      setIsProcessing(false);
-    }
+  const switchTab = (tab: Tab) => {
+    setActiveTab(tab);
+    setPesan({ type: "", text: "" });
   };
 
-  const handleUpdateUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsProcessing(true);
-    try {
-      const res = guard(await fetch(`https://api.squarecloudsmc.com/users/${editingUser.id}`, {
-        method: "PUT",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          name: editingUser.name,
-          email: editingUser.email,
-          job_title: editingUser.job_title,
-          password: editingUser.newPassword || undefined,
-        }),
-      }));
-      if (!res.ok) throw new Error("Gagal update");
-      setPesan({ type: "success", text: "Data kreator diupdate!" });
-      setEditingUser(null);
-      fetchUsers();
-    } catch (err: any) {
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+  // ==========================================================================
+  // KREATOR & PENDAFTAR
+  // ==========================================================================
 
-  const handleDeleteUser = async (id: number) => {
-    if (!confirm("Hapus kreator ini permanen?")) return;
-    guard(await fetch(`https://api.squarecloudsmc.com/users/${id}`, { method: "DELETE", headers: authHeaders() }));
-    fetchUsers();
-  };
+  const pendingUsers = usersList.filter((u) => u.account_status === "Pending");
+  const creators = usersList.filter((u) => u.account_status !== "Pending");
+  const activeCreators = usersList.filter((u) => u.account_status === "Active");
 
-  const handleUpdateContent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsProcessing(true);
-    const totalPersen = editingContent.splits.reduce(
-      (acc: number, curr: any) => acc + Number(curr.percentage),
-      0
-    );
-    if (totalPersen > 80) {
-      setPesan({ type: "error", text: "Total split kreator melebihi 80%!" });
-      setIsProcessing(false);
-      return;
-    }
+  const linkedCount: Record<number, number> = {};
+  contentsList.forEach((c) =>
+    c.splits.forEach((s) => {
+      linkedCount[s.user_id] = (linkedCount[s.user_id] || 0) + 1;
+    })
+  );
+
+  const updateUser = (id: number, body: Record<string, string>) =>
+    api(`/users/${id}`, { method: "PUT", body: JSON.stringify(body) });
+
+  const runUserAction = async (
+    user: Creator,
+    action: () => Promise<unknown>,
+    successText: string
+  ) => {
+    setBusyId(user.id);
+    setPesan({ type: "", text: "" });
     try {
-      guard(await fetch(`https://api.squarecloudsmc.com/contents/${editingContent.id}`, {
-        method: "PUT",
-        headers: authHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({
-          name: editingContent.name,
-          price: editingContent.price,
-          status: editingContent.status,
-          content_type: editingContent.content_type,
-          splits: editingContent.splits,
-        }),
-      }));
-      setPesan({ type: "success", text: "Data konten diupdate!" });
-      setEditingContent(null);
-      fetchContents();
+      await action();
+      setPesan({ type: "success", text: successText });
+      await Promise.all([fetchUsers(), fetchContents()]);
     } catch (err) {
+      setPesan({ type: "error", text: errMsg(err) });
     } finally {
-      setIsProcessing(false);
+      setBusyId(null);
     }
   };
 
-  const handleDeleteContent = async (id: number) => {
-    if (!confirm("Hapus konten permanen?")) return;
-    guard(await fetch(`https://api.squarecloudsmc.com/contents/${id}`, { method: "DELETE", headers: authHeaders() }));
-    fetchContents();
-    fetchReports();
+  const handleApprove = (u: Creator) =>
+    runUserAction(
+      u,
+      () => updateUser(u.id, { account_status: "Active" }),
+      `${u.name} disetujui dan sekarang bisa login.`
+    );
+
+  const handleReject = (u: Creator) => {
+    if (!confirm(`Tolak pendaftaran ${u.name} (${u.email})? Akun akan dihapus permanen.`)) return;
+    runUserAction(
+      u,
+      () => api(`/users/${u.id}`, { method: "DELETE" }),
+      `Pendaftaran ${u.name} ditolak.`
+    );
   };
+
+  const handleJobChange = (u: Creator, jobTitle: string) =>
+    runUserAction(
+      u,
+      () => updateUser(u.id, { job_title: jobTitle }),
+      `Job title ${u.name} diperbarui.`
+    );
+
+  const handleToggleStatus = (u: Creator) => {
+    const next = u.account_status === "Active" ? "Inactive" : "Active";
+    if (next === "Inactive" && !confirm(`Nonaktifkan ${u.name}? Kreator ini tidak akan bisa login.`))
+      return;
+    runUserAction(
+      u,
+      () => updateUser(u.id, { account_status: next }),
+      next === "Active" ? `${u.name} diaktifkan.` : `${u.name} dinonaktifkan.`
+    );
+  };
+
+  const openResetPassword = (u: Creator) => {
+    setResetUser(u);
+    setNewPassword("");
+    setResetError("");
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetUser) return;
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      setResetError(`Password minimal ${MIN_PASSWORD_LENGTH} karakter.`);
+      return;
+    }
+    setBusyId(resetUser.id);
+    setResetError("");
+    try {
+      await updateUser(resetUser.id, { password: newPassword });
+      setPesan({ type: "success", text: `Password ${resetUser.name} berhasil direset.` });
+      setResetUser(null);
+      setNewPassword("");
+    } catch (err) {
+      setResetError(errMsg(err));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // ==========================================================================
+  // KONTEN & SPLIT
+  // ==========================================================================
+
+  const lastSynced = contentsList.reduce<string | null>(
+    (latest, c) => (c.last_synced_at && (!latest || c.last_synced_at > latest) ? c.last_synced_at : latest),
+    null
+  );
+
+  const openSplitEditor = (content: Content) => {
+    const current = new Map(content.splits.map((s) => [s.user_id, s.split_percentage]));
+    setSplitError("");
+    setSplitEditor({
+      content,
+      rows: activeCreators.map((u) => ({
+        user_id: u.id,
+        name: u.name,
+        checked: current.has(u.id),
+        percentage: current.has(u.id) ? String(current.get(u.id)) : "",
+      })),
+    });
+  };
+
+  const updateSplitRow = (userId: number, patch: Partial<SplitRow>) =>
+    setSplitEditor((ed) =>
+      ed && {
+        ...ed,
+        rows: ed.rows.map((r) => (r.user_id === userId ? { ...r, ...patch } : r)),
+      }
+    );
+
+  const checkedRows = splitEditor ? splitEditor.rows.filter((r) => r.checked) : [];
+  const splitTotal = roundPct(checkedRows.reduce((sum, r) => sum + (Number(r.percentage) || 0), 0));
+  const hasEmptyPct = checkedRows.some((r) => !(Number(r.percentage) > 0));
+  const overLimit = splitTotal > MAX_CREATOR_SPLIT;
+  // Split ke kreator yang tidak Active tidak bisa dipertahankan (backend hanya
+  // menerima kreator Active), jadi akan hilang saat disimpan.
+  const droppedSplits = splitEditor
+    ? splitEditor.content.splits.filter((s) => !activeCreators.some((u) => u.id === s.user_id))
+    : [];
+
+  const handleSaveSplits = async () => {
+    if (!splitEditor) return;
+    if (hasEmptyPct) {
+      setSplitError("Isi persentase lebih dari 0 untuk setiap kreator yang dicentang.");
+      return;
+    }
+    if (overLimit) {
+      setSplitError(`Total kreator maksimal ${MAX_CREATOR_SPLIT}%.`);
+      return;
+    }
+    setSavingSplits(true);
+    setSplitError("");
+    try {
+      const data = await api(`/contents/${splitEditor.content.id}/splits`, {
+        method: "PUT",
+        body: JSON.stringify({
+          splits: checkedRows.map((r) => ({
+            user_id: r.user_id,
+            split_percentage: Number(r.percentage),
+          })),
+        }),
+      });
+      setContentsList((list) => list.map((c) => (c.id === data.data.id ? data.data : c)));
+      setPesan({ type: "success", text: `Split ${splitEditor.content.name} disimpan.` });
+      setSplitEditor(null);
+    } catch (err) {
+      setSplitError(errMsg(err));
+    } finally {
+      setSavingSplits(false);
+    }
+  };
+
+  // ==========================================================================
+  // LAPORAN
+  // ==========================================================================
 
   // --- LOGIKA GROUPING LAPORAN HARIAN JADI 1 BARIS PER BULAN ---
   const availableMonths = Array.from(new Set(reportsList.map((r) => r.bulan)));
@@ -326,15 +378,15 @@ export default function AdminDashboard() {
     b.bulan.localeCompare(a.bulan)
   );
 
-  const currentTotalSplit = formSplits.reduce((acc, curr) => acc + Number(curr.percentage), 0);
-  const scShare = 100 - currentTotalSplit;
-
   if (loading)
     return (
       <div className="min-h-screen flex items-center justify-center font-bold text-blue-600">
         Memuat...
       </div>
     );
+
+  const navClass = (tab: Tab) =>
+    `text-left px-4 py-3 rounded-xl font-medium flex items-center justify-between ${activeTab === tab ? "bg-blue-50 text-blue-700" : "text-gray-600"}`;
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col md:flex-row relative">
@@ -343,31 +395,26 @@ export default function AdminDashboard() {
           Admin Panel
         </h1>
         <nav className="flex flex-col gap-2 flex-grow">
-          <button
-            onClick={() => {
-              setActiveTab("kreator");
-              setPesan({ type: "", text: "" });
-            }}
-            className={`text-left px-4 py-3 rounded-xl font-medium ${activeTab === "kreator" ? "bg-blue-50 text-blue-700" : "text-gray-600"}`}
-          >
-            Manajemen Kreator
+          <button onClick={() => switchTab("pendaftar")} className={navClass("pendaftar")}>
+            <span>Pendaftar</span>
+            {pendingUsers.length > 0 && (
+              <span className="ml-2 rounded-full bg-amber-500 px-2 py-0.5 text-xs font-bold text-white">
+                {pendingUsers.length}
+              </span>
+            )}
+          </button>
+          <button onClick={() => switchTab("kreator")} className={navClass("kreator")}>
+            Kreator
+          </button>
+          <button onClick={() => switchTab("konten")} className={navClass("konten")}>
+            Konten
           </button>
           <button
             onClick={() => {
-              setActiveTab("konten");
-              setPesan({ type: "", text: "" });
+              switchTab("laporan");
+              fetchReports().catch((err) => setPesan({ type: "error", text: errMsg(err) }));
             }}
-            className={`text-left px-4 py-3 rounded-xl font-medium ${activeTab === "konten" ? "bg-blue-50 text-blue-700" : "text-gray-600"}`}
-          >
-            Manajemen Konten
-          </button>
-          <button
-            onClick={() => {
-              setActiveTab("laporan");
-              fetchReports();
-              setPesan({ type: "", text: "" });
-            }}
-            className={`text-left px-4 py-3 rounded-xl font-medium ${activeTab === "laporan" ? "bg-blue-50 text-blue-700" : "text-gray-600"}`}
+            className={navClass("laporan")}
           >
             Laporan Penjualan
           </button>
@@ -389,6 +436,262 @@ export default function AdminDashboard() {
             className={`mb-6 p-4 rounded-xl text-sm font-bold ${pesan.type === "error" ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}
           >
             {pesan.text}
+          </div>
+        )}
+
+        {/* TAB PENDAFTAR */}
+        {activeTab === "pendaftar" && (
+          <div className="max-w-5xl space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800 mb-2">Pendaftar Baru</h2>
+              <p className="text-sm text-gray-500 font-medium">
+                Kreator yang mendaftar sendiri dan menunggu persetujuan.
+              </p>
+            </div>
+            <div className="bg-white rounded-3xl border border-gray-100 overflow-x-auto shadow-sm">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Nama</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Email</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
+                      Job Title
+                    </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
+                      Tanggal Daftar
+                    </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
+                      Aksi
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pendingUsers.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="text-center py-8 text-gray-400 font-bold">
+                        Tidak ada pendaftar yang menunggu persetujuan.
+                      </td>
+                    </tr>
+                  ) : (
+                    pendingUsers.map((u) => (
+                      <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50/50">
+                        <td className="px-6 py-4 font-bold text-gray-900">{u.name}</td>
+                        <td className="px-6 py-4 text-sm text-gray-700">{u.email}</td>
+                        <td className="px-6 py-4 text-sm text-gray-700">{u.job_title || "-"}</td>
+                        <td className="px-6 py-4 text-sm text-gray-700">
+                          {formatDate(u.created_at)}
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex justify-center gap-2">
+                            <button
+                              onClick={() => handleApprove(u)}
+                              disabled={busyId === u.id}
+                              className="bg-green-600 text-white px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50"
+                            >
+                              Setujui
+                            </button>
+                            <button
+                              onClick={() => handleReject(u)}
+                              disabled={busyId === u.id}
+                              className="bg-red-50 text-red-600 px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50"
+                            >
+                              Tolak
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB KREATOR */}
+        {activeTab === "kreator" && (
+          <div className="max-w-6xl space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800 mb-2">Kreator</h2>
+              <p className="text-sm text-gray-500 font-medium">
+                Kreator nonaktif tidak bisa login dan tidak bisa ditautkan ke konten baru.
+              </p>
+            </div>
+            <div className="bg-white rounded-3xl border border-gray-100 overflow-x-auto shadow-sm">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Nama</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Email</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
+                      Job Title
+                    </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Status</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
+                      Konten
+                    </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
+                      Aksi
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {creators.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="text-center py-8 text-gray-400 font-bold">
+                        Belum ada kreator yang disetujui.
+                      </td>
+                    </tr>
+                  ) : (
+                    creators.map((u) => {
+                      const isActive = u.account_status === "Active";
+                      return (
+                        <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50/50">
+                          <td className="px-6 py-4 font-bold text-gray-900">{u.name}</td>
+                          <td className="px-6 py-4 text-sm text-gray-700">{u.email}</td>
+                          <td className="px-6 py-4">
+                            <select
+                              value={u.job_title || ""}
+                              disabled={busyId === u.id}
+                              onChange={(e) => handleJobChange(u, e.target.value)}
+                              className="rounded-lg border border-gray-300 px-2 py-1 text-sm bg-white disabled:opacity-50"
+                            >
+                              {!JOB_OPTIONS.includes(u.job_title || "") && (
+                                <option value={u.job_title || ""} disabled>
+                                  {u.job_title || "-"}
+                                </option>
+                              )}
+                              {JOB_OPTIONS.map((j) => (
+                                <option key={j} value={j}>
+                                  {j}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-6 py-4">
+                            <button
+                              onClick={() => handleToggleStatus(u)}
+                              disabled={busyId === u.id}
+                              title={isActive ? "Klik untuk menonaktifkan" : "Klik untuk mengaktifkan"}
+                              className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-bold disabled:opacity-50 ${isActive ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-600"}`}
+                            >
+                              <span
+                                className={`h-2 w-2 rounded-full ${isActive ? "bg-green-500" : "bg-gray-400"}`}
+                              />
+                              {isActive ? "Aktif" : "Nonaktif"}
+                            </button>
+                          </td>
+                          <td className="px-6 py-4 text-center text-sm font-bold text-gray-700">
+                            {linkedCount[u.id] || 0}
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            <button
+                              onClick={() => openResetPassword(u)}
+                              className="text-blue-600 font-bold text-sm bg-blue-50 px-3 py-1 rounded-lg"
+                            >
+                              Reset Password
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* TAB KONTEN (READ-ONLY DARI PATHWAY) */}
+        {activeTab === "konten" && (
+          <div className="max-w-7xl space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800 mb-2">Konten</h2>
+              <p className="text-sm text-gray-500 font-medium">
+                Data konten disinkronkan otomatis dari Pathway setiap hari.
+                {lastSynced && ` Terakhir sinkron: ${formatDateTime(lastSynced)}.`}
+              </p>
+            </div>
+            <div className="bg-white rounded-3xl border border-gray-100 overflow-x-auto shadow-sm">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">Nama</th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">Status</th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">
+                      Pack Type
+                    </th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">Tier</th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">Harga</th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">Rilis</th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Total Unit
+                    </th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">Kreator</th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase text-center">
+                      Aksi
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {contentsList.length === 0 ? (
+                    <tr>
+                      <td colSpan={9} className="text-center py-8 text-gray-400 font-bold">
+                        Belum ada konten dari Pathway.
+                      </td>
+                    </tr>
+                  ) : (
+                    contentsList.map((c) => (
+                      <tr key={c.id} className="border-b border-gray-50 hover:bg-gray-50/50 align-top">
+                        <td className="px-4 py-4 font-bold text-gray-900 text-sm">{c.name}</td>
+                        <td className="px-4 py-4">
+                          <span
+                            className={`whitespace-nowrap px-2 py-1 rounded text-[10px] font-black uppercase tracking-wider ${STATUS_BADGE[c.status || ""] || "bg-gray-100 text-gray-600"}`}
+                          >
+                            {c.status || "-"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-4 text-sm text-gray-700">{c.pack_type || "-"}</td>
+                        <td className="px-4 py-4 text-sm text-gray-700">{c.tier ?? "-"}</td>
+                        <td className="px-4 py-4 text-sm text-gray-700">
+                          {c.price != null ? `$${c.price.toFixed(2)}` : "-"}
+                        </td>
+                        <td className="px-4 py-4 text-sm text-gray-700 whitespace-nowrap">
+                          {c.release_date || "-"}
+                        </td>
+                        <td className="px-4 py-4 text-sm font-bold text-gray-800 text-right">
+                          {c.units_total.toLocaleString("id-ID")}
+                        </td>
+                        <td className="px-4 py-4">
+                          {c.splits.length === 0 ? (
+                            <span className="text-xs text-gray-400 font-bold">Belum ditautkan</span>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {c.splits.map((s) => (
+                                <span
+                                  key={s.user_id}
+                                  className="whitespace-nowrap text-xs bg-green-50 px-2 py-1 rounded-lg text-green-700 font-bold"
+                                >
+                                  {s.user_name} ({s.split_percentage}%)
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-4 text-center">
+                          <button
+                            onClick={() => openSplitEditor(c)}
+                            className="whitespace-nowrap text-blue-600 font-bold text-sm bg-blue-50 px-3 py-1 rounded-lg"
+                          >
+                            Atur split
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
@@ -490,529 +793,133 @@ export default function AdminDashboard() {
             </div>
           </div>
         )}
-
-        {/* TAB KONTEN */}
-        {activeTab === "konten" && (
-          <div className="max-w-5xl space-y-8">
-            <div>
-              <h2 className="text-2xl font-bold text-gray-800 mb-6">Tambah Konten Baru</h2>
-              <form
-                onSubmit={handleSubmitKonten}
-                className="bg-white p-8 rounded-3xl shadow-sm border border-gray-100 space-y-8"
-              >
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                  <div className="md:col-span-3">
-                    <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Nama Konten
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={formKonten.name}
-                      onChange={(e) => setFormKonten({ ...formKonten, name: e.target.value })}
-                      className="w-full rounded-xl border border-gray-300 px-4 py-2"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Harga</label>
-                    <select
-                      value={formKonten.price}
-                      onChange={(e) =>
-                        setFormKonten({ ...formKonten, price: Number(e.target.value) })
-                      }
-                      className="w-full rounded-xl border border-gray-300 px-4 py-2 bg-white"
-                    >
-                      {TIER_OPTIONS.map((t) => (
-                        <option key={t.tier} value={t.price}>
-                          Tier {t.tier} (${t.price.toFixed(2)})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Jenis Konten
-                    </label>
-                    <select
-                      value={formKonten.content_type}
-                      onChange={(e) =>
-                        setFormKonten({ ...formKonten, content_type: e.target.value })
-                      }
-                      className="w-full rounded-xl border border-gray-300 px-4 py-2 bg-white"
-                    >
-                      {TYPE_OPTIONS.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Status Konten
-                    </label>
-                    <select
-                      value={formKonten.status}
-                      onChange={(e) => setFormKonten({ ...formKonten, status: e.target.value })}
-                      className="w-full rounded-xl border border-gray-300 px-4 py-2 bg-white"
-                    >
-                      {STATUS_OPTIONS.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between items-center border-b pb-2 mb-4">
-                    <h3 className="text-lg font-bold text-gray-900">Alokasi Royalti</h3>
-                    <button
-                      type="button"
-                      onClick={handleAddSplitRow}
-                      className="text-sm font-bold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg"
-                    >
-                      + Tambah Kreator
-                    </button>
-                  </div>
-
-                  <div className="flex gap-3 bg-blue-50/50 p-4 rounded-xl border border-blue-100 mb-3">
-                    <div className="flex-1">
-                      <p className="text-sm font-bold text-blue-800 mt-2">
-                        🏢 Squareclouds (Publisher)
-                      </p>
-                    </div>
-                    <div className="w-32">
-                      <input
-                        type="text"
-                        disabled
-                        value={`${scShare}%`}
-                        className="w-full rounded-lg border-blue-200 px-3 py-2 text-sm bg-blue-100 font-bold text-blue-800"
-                      />
-                    </div>
-                  </div>
-
-                  {formSplits.length === 0 && (
-                    <div className="text-sm text-gray-500 font-bold p-4 text-center bg-gray-50 rounded-xl border border-gray-100">
-                      Tidak ada kreator ditambahkan. Squareclouds mendapat full 100%.
-                    </div>
-                  )}
-
-                  <div className="space-y-3">
-                    {formSplits.map((split, index) => (
-                      <div
-                        key={index}
-                        className="flex gap-3 items-end bg-gray-50 p-4 rounded-xl border border-gray-100"
-                      >
-                        <div className="flex-1">
-                          <label className="block text-xs font-bold text-gray-500 mb-1">
-                            Pilih Kreator
-                          </label>
-                          <select
-                            required
-                            value={split.user_id}
-                            onChange={(e) => {
-                              const newS = [...formSplits];
-                              newS[index].user_id = e.target.value;
-                              setFormSplits(newS);
-                            }}
-                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm bg-white"
-                          >
-                            <option value="" disabled>
-                              -- Pilih Kreator --
-                            </option>
-                            {usersList.map((u) => (
-                              <option key={u.id} value={u.id}>
-                                {u.name} ({u.job_title})
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="w-32">
-                          <label className="block text-xs font-bold text-gray-500 mb-1">
-                            Persen (%)
-                          </label>
-                          <input
-                            type="number"
-                            step="0.1"
-                            max="80"
-                            required
-                            value={split.percentage}
-                            onChange={(e) => {
-                              const newS = [...formSplits];
-                              newS[index].percentage = Number(e.target.value);
-                              setFormSplits(newS);
-                            }}
-                            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-bold text-green-600"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const newS = [...formSplits];
-                            newS.splice(index, 1);
-                            setFormSplits(newS);
-                          }}
-                          className="bg-red-100 text-red-600 px-3 py-2 rounded-lg text-sm font-bold"
-                        >
-                          X
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <button
-                  type="submit"
-                  disabled={isProcessing}
-                  className="w-full bg-blue-600 text-white px-6 py-4 rounded-xl font-bold"
-                >
-                  Simpan Konten
-                </button>
-              </form>
-            </div>
-
-            <div>
-              <h2 className="text-xl font-bold text-gray-800 mb-4">Daftar Konten</h2>
-              <div className="bg-white rounded-3xl border border-gray-100 overflow-hidden shadow-sm">
-                <table className="w-full text-left">
-                  <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500">KONTEN</th>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500">TIPE</th>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500">HARGA</th>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500 text-center">
-                        STATUS
-                      </th>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500 text-center">
-                        AKSI
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {contentsList.map((c) => (
-                      <tr
-                        key={c.id}
-                        className="border-b border-gray-50 hover:bg-gray-50/50 transition-colors"
-                      >
-                        <td className="px-6 py-4 font-bold text-gray-800">{c.name}</td>
-                        <td className="px-6 py-4 text-sm font-medium text-gray-600">
-                          {c.content_type}
-                        </td>
-                        <td className="px-6 py-4 text-sm font-bold text-gray-800">${c.price}</td>
-                        <td className="px-6 py-4 text-center">
-                          <span
-                            className={`px-3 py-1 rounded-full text-xs font-extrabold ${
-                              c.status === "Published"
-                                ? "bg-green-100 text-green-600"
-                                : "bg-amber-100 text-amber-700"
-                            }`}
-                          >
-                            {c.status || "Development"}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-center">
-                          <button
-                            onClick={() =>
-                              setEditingContent({ ...c, splits: c.splits.length ? c.splits : [] })
-                            }
-                            className="text-blue-600 font-bold text-sm bg-blue-50 hover:bg-blue-100 transition px-3 py-1.5 rounded-lg"
-                          >
-                            Edit
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB KREATOR */}
-        {activeTab === "kreator" && (
-          <div className="max-w-4xl space-y-8">
-            <div>
-              <h2 className="text-2xl font-bold text-gray-800 mb-6">Tambah Kreator</h2>
-              <form
-                onSubmit={handleSubmitKreator}
-                className="bg-white p-8 rounded-3xl shadow-sm border border-gray-100 grid grid-cols-2 gap-5"
-              >
-                <div className="col-span-2">
-                  <label className="block text-sm font-bold mb-1">Nama</label>
-                  <input
-                    type="text"
-                    required
-                    value={formKreator.name}
-                    onChange={(e) => setFormKreator({ ...formKreator, name: e.target.value })}
-                    className="w-full rounded-xl border px-4 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold mb-1">Email</label>
-                  <input
-                    type="email"
-                    required
-                    value={formKreator.email}
-                    onChange={(e) => setFormKreator({ ...formKreator, email: e.target.value })}
-                    className="w-full rounded-xl border px-4 py-2"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-bold mb-1">Role / Job Title</label>
-                  <select
-                    value={formKreator.job_title}
-                    onChange={(e) => setFormKreator({ ...formKreator, job_title: e.target.value })}
-                    className="w-full rounded-xl border px-4 py-2 bg-white"
-                  >
-                    {JOB_OPTIONS.map((j) => (
-                      <option key={j} value={j}>
-                        {j}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-sm font-bold mb-1">Password</label>
-                  <input
-                    type="password"
-                    required
-                    value={formKreator.password}
-                    onChange={(e) => setFormKreator({ ...formKreator, password: e.target.value })}
-                    className="w-full rounded-xl border px-4 py-2"
-                  />
-                </div>
-                <div className="col-span-2">
-                  <button
-                    type="submit"
-                    className="w-full bg-blue-600 text-white px-6 py-3 rounded-xl font-bold"
-                  >
-                    Daftarkan
-                  </button>
-                </div>
-              </form>
-            </div>
-            <div>
-              <div className="bg-white rounded-3xl border border-gray-100 overflow-hidden shadow-sm">
-                <table className="w-full text-left">
-                  <thead className="bg-gray-50 border-b border-gray-100">
-                    <tr>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500">NAMA</th>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500">JOB TITLE</th>
-                      <th className="px-6 py-4 text-xs font-bold text-gray-500 text-center">
-                        AKSI
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {usersList.map((u) => (
-                      <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50/50">
-                        <td className="px-6 py-4 font-bold">{u.name}</td>
-                        <td className="px-6 py-4 text-sm">{u.job_title}</td>
-                        <td className="px-6 py-4 text-center">
-                          <button
-                            onClick={() => setEditingUser(u)}
-                            className="text-blue-600 font-bold text-sm bg-blue-50 px-3 py-1 rounded-lg"
-                          >
-                            Edit
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
-      {/* POP-UP EDIT KREATOR */}
-      {editingUser && (
+      {/* MODAL ATUR SPLIT */}
+      {splitEditor && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white p-8 rounded-3xl max-w-md w-full">
-            <h3 className="text-xl font-bold mb-4">Edit Kreator</h3>
-            <form onSubmit={handleUpdateUser} className="space-y-4">
-              <div>
-                <label className="block text-sm font-bold mb-1">Nama</label>
-                <input
-                  type="text"
-                  value={editingUser.name}
-                  onChange={(e) => setEditingUser({ ...editingUser, name: e.target.value })}
-                  className="w-full rounded-xl border px-4 py-2"
-                />
+          <div className="bg-white p-8 rounded-3xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+            <h3 className="text-xl font-bold mb-1">Atur Split</h3>
+            <p className="text-sm text-gray-500 mb-6">{splitEditor.content.name}</p>
+
+            {droppedSplits.length > 0 && (
+              <div className="mb-4 rounded-xl bg-amber-50 p-3 text-xs font-bold text-amber-700">
+                Split untuk kreator yang tidak aktif akan dihapus saat disimpan:{" "}
+                {droppedSplits.map((s) => `${s.user_name} (${s.split_percentage}%)`).join(", ")}.
               </div>
-              <div>
-                <label className="block text-sm font-bold mb-1">Job Title</label>
-                <select
-                  value={editingUser.job_title}
-                  onChange={(e) => setEditingUser({ ...editingUser, job_title: e.target.value })}
-                  className="w-full rounded-xl border px-4 py-2 bg-white"
-                >
-                  {JOB_OPTIONS.map((j) => (
-                    <option key={j} value={j}>
-                      {j}
-                    </option>
-                  ))}
-                </select>
+            )}
+
+            {splitEditor.rows.length === 0 ? (
+              <p className="text-sm text-gray-400 font-bold">Belum ada kreator aktif.</p>
+            ) : (
+              <div className="space-y-2">
+                {splitEditor.rows.map((r) => (
+                  <label
+                    key={r.user_id}
+                    className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${r.checked ? "border-blue-200 bg-blue-50/50" : "border-gray-100"}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.checked}
+                      onChange={(e) => updateSplitRow(r.user_id, { checked: e.target.checked })}
+                      className="h-4 w-4"
+                    />
+                    <span className="flex-1 text-sm font-bold text-gray-800">{r.name}</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={MAX_CREATOR_SPLIT}
+                      step="0.1"
+                      disabled={!r.checked}
+                      value={r.percentage}
+                      onChange={(e) => updateSplitRow(r.user_id, { percentage: e.target.value })}
+                      className="w-20 rounded-lg border border-gray-300 px-2 py-1 text-sm font-bold text-green-600 disabled:bg-gray-50 disabled:text-gray-300"
+                    />
+                    <span className="text-sm text-gray-500">%</span>
+                  </label>
+                ))}
               </div>
-              <div className="flex gap-3 pt-4 border-t mt-6">
-                <button
-                  type="submit"
-                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl font-bold"
-                >
-                  Simpan
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDeleteUser(editingUser.id)}
-                  className="px-4 py-2.5 rounded-xl font-bold bg-red-100 text-red-600"
-                >
-                  Hapus
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditingUser(null)}
-                  className="px-4 py-2.5 rounded-xl font-bold bg-gray-100"
-                >
-                  Batal
-                </button>
+            )}
+
+            <div className="mt-6 space-y-1 border-t pt-4 text-sm">
+              <div className="flex justify-between font-bold">
+                <span className="text-gray-600">Total kreator</span>
+                <span className={overLimit ? "text-red-600" : "text-gray-900"}>
+                  {splitTotal}% / {MAX_CREATOR_SPLIT}%
+                </span>
               </div>
-            </form>
+              <div className="flex justify-between font-bold">
+                <span className="text-gray-600">SquareClouds</span>
+                <span className="text-blue-600">{roundPct(100 - splitTotal)}%</span>
+              </div>
+              {overLimit && (
+                <p className="text-xs font-bold text-red-600">
+                  Total kreator melebihi {MAX_CREATOR_SPLIT}%. Kurangi persentasenya.
+                </p>
+              )}
+            </div>
+
+            {splitError && (
+              <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">
+                {splitError}
+              </div>
+            )}
+
+            <div className="flex gap-3 pt-4 border-t mt-6">
+              <button
+                type="button"
+                onClick={handleSaveSplits}
+                disabled={savingSplits || overLimit || hasEmptyPct}
+                className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl font-bold hover:bg-blue-700 transition disabled:opacity-50"
+              >
+                {savingSplits ? "Menyimpan..." : "Simpan"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setSplitEditor(null)}
+                className="px-4 py-2.5 rounded-xl font-bold bg-gray-100 hover:bg-gray-200 transition"
+              >
+                Batal
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* POP-UP EDIT KONTEN & SPLIT & STATUS */}
-      {editingContent && (
+      {/* MODAL RESET PASSWORD */}
+      {resetUser && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white p-8 rounded-3xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
-            <h3 className="text-xl font-bold mb-4">Edit Konten & Split</h3>
-            <form onSubmit={handleUpdateContent} className="space-y-4">
+          <div className="bg-white p-8 rounded-3xl max-w-md w-full">
+            <h3 className="text-xl font-bold mb-1">Reset Password</h3>
+            <p className="text-sm text-gray-500 mb-6">
+              {resetUser.name} ({resetUser.email})
+            </p>
+            <form onSubmit={handleResetPassword} className="space-y-4">
               <div>
-                <label className="block text-xs font-bold text-gray-500 mb-1">Nama Konten</label>
+                <label className="block text-sm font-bold mb-1">Password baru</label>
                 <input
-                  type="text"
-                  value={editingContent.name}
-                  onChange={(e) => setEditingContent({ ...editingContent, name: e.target.value })}
-                  className="w-full rounded-xl border border-gray-300 px-4 py-2"
+                  type="password"
+                  required
+                  minLength={MIN_PASSWORD_LENGTH}
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="Minimal 8 karakter"
+                  className="w-full rounded-xl border px-4 py-2"
                 />
               </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 mb-1">Harga ($)</label>
-                  <select
-                    value={editingContent.price}
-                    onChange={(e) =>
-                      setEditingContent({ ...editingContent, price: Number(e.target.value) })
-                    }
-                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white"
-                  >
-                    {TIER_OPTIONS.map((t) => (
-                      <option key={t.tier} value={t.price}>
-                        Tier {t.tier} (${t.price.toFixed(2)})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 mb-1">
-                    Status Konten
-                  </label>
-                  <select
-                    value={editingContent.status || "Development"}
-                    onChange={(e) =>
-                      setEditingContent({ ...editingContent, status: e.target.value })
-                    }
-                    className="w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white font-bold text-blue-600"
-                  >
-                    {STATUS_OPTIONS.map((opt) => (
-                      <option key={opt} value={opt}>
-                        {opt}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="space-y-2 border-t pt-4">
-                <h4 className="text-sm font-bold text-gray-800">Kreator Splits (Max 80%)</h4>
-                {editingContent.splits.map((split: any, index: number) => (
-                  <div key={index} className="flex gap-2">
-                    <select
-                      value={split.user_id}
-                      onChange={(e) => {
-                        const s = [...editingContent.splits];
-                        s[index].user_id = e.target.value;
-                        setEditingContent({ ...editingContent, splits: s });
-                      }}
-                      className="flex-1 rounded-lg border border-gray-300 px-2 py-1 text-sm bg-white"
-                    >
-                      {usersList.map((u) => (
-                        <option key={u.id} value={u.id}>
-                          {u.name}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      type="number"
-                      step="0.1"
-                      max="80"
-                      value={split.percentage}
-                      onChange={(e) => {
-                        const s = [...editingContent.splits];
-                        s[index].percentage = Number(e.target.value);
-                        setEditingContent({ ...editingContent, splits: s });
-                      }}
-                      className="w-20 rounded-lg border border-gray-300 px-2 py-1 text-sm font-bold text-green-600"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const s = [...editingContent.splits];
-                        s.splice(index, 1);
-                        setEditingContent({ ...editingContent, splits: s });
-                      }}
-                      className="bg-red-100 text-red-600 px-2 rounded-lg text-xs font-bold"
-                    >
-                      X
-                    </button>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  onClick={() =>
-                    setEditingContent({
-                      ...editingContent,
-                      splits: [...editingContent.splits, { user_id: "", percentage: 0 }],
-                    })
-                  }
-                  className="text-xs font-bold text-blue-600"
-                >
-                  + Tambah Kreator
-                </button>
-              </div>
-
-              <div className="flex gap-3 pt-4 border-t">
+              {resetError && <p className="text-sm font-bold text-red-600">{resetError}</p>}
+              <div className="flex gap-3 pt-4 border-t mt-6">
                 <button
                   type="submit"
-                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl font-bold hover:bg-blue-700 transition"
+                  disabled={busyId === resetUser.id}
+                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl font-bold disabled:opacity-50"
                 >
                   Simpan
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleDeleteContent(editingContent.id)}
-                  className="px-4 py-2.5 rounded-xl font-bold bg-red-100 text-red-600 hover:bg-red-200 transition"
-                >
-                  Hapus
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditingContent(null)}
-                  className="px-4 py-2.5 rounded-xl font-bold bg-gray-100 hover:bg-gray-200 transition"
+                  onClick={() => setResetUser(null)}
+                  className="px-4 py-2.5 rounded-xl font-bold bg-gray-100"
                 >
                   Batal
                 </button>
