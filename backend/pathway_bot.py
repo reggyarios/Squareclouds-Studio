@@ -67,7 +67,8 @@ def dump(page, name: str, html_selector: str | None = None) -> None:
     base = DEBUG_DIR / f"{_shot:02d}-{name}"
     try:
         page.screenshot(path=f"{base}.png", full_page=True)
-        html = page.locator(html_selector).first.inner_html() if html_selector else page.content()
+        loc = page.locator(html_selector).first if html_selector else None
+        html = loc.inner_html() if (loc is not None and loc.count()) else page.content()
         Path(f"{base}.html").write_text(html, encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         log(f"  (debug dump gagal: {e})")
@@ -122,16 +123,23 @@ def _cell_lines(cell) -> list[str]:
 
 def scrape_offers(page) -> list[dict]:
     log("Membaca halaman Offers...")
-    page.goto(BASE + "/dashboard/offers", wait_until="networkidle")
+    # Klik menu sidebar, jangan tebak URL-nya.
+    page.get_by_role("link", name=re.compile(r"^\s*Offers\s*$")).first.click()
+    page.wait_for_load_state("networkidle")
+    page.wait_for_selector("table", timeout=20_000)
+    log(f"  URL Offers: {page.url}")
     dump(page, "offers")
     offers: list[dict] = []
 
     for tab in OFFER_TABS:
-        tab_el = page.get_by_role("tab", name=re.compile(rf"^{re.escape(tab)}"))
+        pat = re.compile(rf"^\s*{re.escape(tab)}\s*\d*\s*$")
+        tab_el = page.locator("[role=tab], button, a").filter(has_text=pat)
         if tab_el.count() == 0:
-            tab_el = page.get_by_text(re.compile(rf"^{re.escape(tab)}\s*\d*$")).first
-        tab_el.click()
-        page.wait_for_timeout(600)
+            log(f"  tab '{tab}' tidak ditemukan, dilewati")
+            dump(page, f"tab-missing-{tab.lower().replace(' ', '-')}")
+            continue
+        tab_el.first.click()
+        page.wait_for_timeout(800)
         dump(page, f"offers-{tab.lower().replace(' ', '-')}", "table")
 
         table = page.locator("table").first
@@ -194,27 +202,30 @@ def scrape_offers(page) -> list[dict]:
 # Sales
 # ---------------------------------------------------------------------------
 class SalesCapture:
-    """Menampung response Server Action dari /dashboard/sales."""
+    """Menyadap response Server Action /dashboard/sales lewat page.route."""
 
     def __init__(self, page):
         self.catalog: dict | None = None
         self.series: list[dict] = []
-        page.on("response", self._on_response)
+        page.route(re.compile(r".*/dashboard/sales(\?.*)?$"), self._on_route)
 
-    def _on_response(self, resp):
+    def _on_route(self, route):
+        req = route.request
         try:
-            req = resp.request
-            if req.method != "POST" or "/dashboard/sales" not in resp.url:
-                return
-            if not resp.headers.get("content-type", "").startswith("text/x-component"):
-                return
-            for obj in parse_action_body(resp.text()):
-                if "content" in obj and "links" in obj:
-                    self.catalog = obj
-                elif "days" in obj and "products" in obj:
-                    self.series.append(obj)
+            resp = route.fetch()
+            if req.method == "POST" and resp.headers.get("content-type", "").startswith("text/x-component"):
+                for obj in parse_action_body(resp.text()):
+                    if "content" in obj and "links" in obj:
+                        self.catalog = obj
+                    elif "days" in obj and "products" in obj:
+                        self.series.append(obj)
+            route.fulfill(response=resp)
         except Exception as e:  # noqa: BLE001
-            log(f"  (capture gagal: {e})")
+            log(f"  (capture gagal: {str(e).splitlines()[0]})")
+            try:
+                route.continue_()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _click_text_button(page, label: str) -> bool:
@@ -238,39 +249,25 @@ def _open_offers_dropdown(page):
 
 
 def select_only_offer(page, name: str) -> None:
-    """Buat filter Offers hanya berisi satu produk."""
+    """Buat filter Offers hanya berisi satu produk: Clear, lalu centang `name`."""
     pop = _open_offers_dropdown(page)
     dump(page, f"dropdown-{re.sub(r'[^a-z0-9]+', '-', name.lower())}",
-         "[role=dialog], [role=menu], [role=listbox], [data-radix-popper-content-wrapper]")
+         "[role=dialog], [data-radix-popper-content-wrapper]")
 
-    # 1) Kosongkan pilihan kalau ada "All your offers" / "Select all" yang tercentang.
-    for pat in (r"all your offers", r"select all", r"all offers"):
-        allopt = pop.get_by_text(re.compile(pat, re.I))
-        if allopt.count():
-            el = allopt.first
-            state = (el.get_attribute("aria-checked") or el.get_attribute("data-state") or "")
-            if state in ("true", "checked", ""):
-                el.click()
-                page.wait_for_timeout(200)
-            break
+    clear = pop.get_by_role("button", name=re.compile(r"^\s*Clear\s*$", re.I))
+    if clear.count():
+        clear.first.click()
+        page.wait_for_timeout(300)
 
-    # 2) Pastikan hanya `name` yang tercentang: klik yang lain jika masih aktif.
-    for opt in pop.get_by_role("menuitemcheckbox").all() + pop.get_by_role("option").all() \
-            + pop.get_by_role("checkbox").all():
-        label = opt.inner_text().strip()
-        checked = (opt.get_attribute("aria-checked") or opt.get_attribute("data-state") or "") \
-            in ("true", "checked")
-        if label == name and not checked:
-            opt.click()
-        elif label != name and checked and not re.search(r"all", label, re.I):
-            opt.click()
-        page.wait_for_timeout(100)
-
-    # fallback terakhir: klik teks persis
-    target = pop.get_by_text(name, exact=True)
-    if target.count() and (target.first.get_attribute("aria-checked") or "") != "true":
-        target.first.click()
-
+    label = pop.locator("label").filter(has_text=re.compile(rf"^\s*{re.escape(name)}\s*$"))
+    if label.count() == 0:
+        raise RuntimeError(f"label offer '{name}' tidak ada di dropdown")
+    cb = label.first.locator("button[role=checkbox]")
+    if cb.count() and cb.first.get_attribute("aria-checked") != "true":
+        cb.first.click()
+    elif cb.count() == 0:
+        label.first.click()
+    page.wait_for_timeout(300)
     page.keyboard.press("Escape")
     page.wait_for_timeout(300)
 
@@ -279,14 +276,24 @@ def scrape_sales(page, full: bool) -> tuple[list[dict], dict[str, list[dict]]]:
     """Kembalikan (katalog, {productID: days[]})."""
     log("Membaca halaman Sales...")
     cap = SalesCapture(page)
-    page.goto(BASE + "/dashboard/sales", wait_until="networkidle")
-    page.wait_for_timeout(1000)
+    page.get_by_role("link", name=re.compile(r"^\s*Sales\s*$")).first.click()
+    page.wait_for_url(re.compile(r"/dashboard/sales"), timeout=20_000)
+    page.get_by_text("Export CSV").first.wait_for(timeout=20_000)
+    page.wait_for_load_state("networkidle")
+    log(f"  URL Sales: {page.url}")
     dump(page, "sales")
 
     rng = "All time" if full else "90d"
-    if not _click_text_button(page, rng):
-        log(f"  tombol rentang '{rng}' tidak ditemukan, pakai default halaman")
-    page.wait_for_timeout(1500)
+    n_before = len(cap.series)
+    btn = page.get_by_text(rng, exact=True)
+    if btn.count() == 0:
+        sys.exit(f"Tombol rentang '{rng}' tidak ditemukan di halaman Sales.")
+    btn.first.click()
+    for _ in range(60):
+        if len(cap.series) > n_before:
+            break
+        page.wait_for_timeout(250)
+    log(f"  rentang: {rng}")
 
     if not cap.catalog:
         sys.exit("Katalog Sales tidak tertangkap. Jalankan dengan --debug dan kirim folder debug_pathway/.")
@@ -303,15 +310,36 @@ def scrape_sales(page, full: bool) -> tuple[list[dict], dict[str, list[dict]]]:
             log(f"  [!] gagal memilih offer '{name}': {e}")
             dump(page, "select-fail")
             continue
-        # tunggu response baru
-        for _ in range(30):
-            if len(cap.series) > before:
+        # tunggu response yang filternya persis produk ini
+        match = None
+        for _ in range(60):
+            for obj in cap.series[before:]:
+                prods = [x.get("productID") for x in obj.get("products", [])]
+                if prods == [pid]:
+                    match = obj
+            if match:
                 break
             page.wait_for_timeout(250)
-        if len(cap.series) == before:
-            log(f"  [!] tidak ada response untuk '{name}'")
-            continue
-        days = cap.series[-1]["days"]
+        if not match:
+            log(f"  [~] '{name}' belum dapat response, coba ulang...")
+            before = len(cap.series)
+            try:
+                select_only_offer(page, name)
+            except Exception as e:  # noqa: BLE001
+                log(f"  [!] gagal lagi: {e}")
+                continue
+            for _ in range(60):
+                for obj in cap.series[before:]:
+                    if [x.get("productID") for x in obj.get("products", [])] == [pid]:
+                        match = obj
+                if match:
+                    break
+                page.wait_for_timeout(250)
+            if not match:
+                log(f"  [!] '{name}' tetap tidak dapat response, dilewati")
+                dump(page, "no-match")
+                continue
+        days = match["days"]
         nz = sum(1 for d in days if d.get("units"))
         per_product[pid] = days
         log(f"  {name:28} {len(days):5} hari, {nz:4} hari ada penjualan")
@@ -435,6 +463,10 @@ def main() -> None:
             offers = scrape_offers(page)
             catalog, per_product = scrape_sales(page, full=args.full)
         finally:
+            try:
+                page.unroute_all(behavior="ignoreErrors")
+            except Exception:  # noqa: BLE001
+                pass
             if _debug:
                 DEBUG_DIR.mkdir(exist_ok=True)
                 (DEBUG_DIR / "result.json").write_text(json.dumps({
