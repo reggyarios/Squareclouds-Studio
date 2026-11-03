@@ -170,7 +170,7 @@ export function HeroSection() {
         >
           {/* TOMBOL 1: Email Redirect */}
           <a
-            href="mailto:squarecloudsmc@gmail.com"
+            href="mailto:contact@squarecloudsmc.com"
             className="flex items-center justify-center gap-3 py-3 px-7 w-full max-w-[250px] font-black text-[16px] text-white rounded-full bg-white/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_12px_28px_rgba(3,25,70,0.16)] hover:bg-white/30 hover:-translate-y-1 backdrop-blur-xl transition-all active:translate-y-0"
           >
             Build with us

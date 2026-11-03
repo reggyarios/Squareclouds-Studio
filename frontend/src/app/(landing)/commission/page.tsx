@@ -690,7 +690,7 @@ export default function CommissionPage() {
         {/* CLOSING: EDITORIAL METRICS & CTA */}
         <section className="w-full pt-32 pb-40 px-6 md:px-12 max-w-[1600px] mx-auto overflow-hidden">
           <div className="flex flex-col items-center text-center">
-            <a href="mailto:squarecloudsmc@gmail.com" className="group block pointer-events-auto">
+            <a href="mailto:contact@squarecloudsmc.com" className="group block pointer-events-auto">
               <RevealText className="text-[12vw] md:text-[9vw] font-black tracking-tighter uppercase text-slate-900 leading-none group-hover:text-blue-600 transition-colors duration-500">
                 GET IN TOUCH
               </RevealText>

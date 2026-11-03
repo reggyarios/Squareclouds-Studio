@@ -210,7 +210,7 @@ return (
           </div>
 
           <a
-            href="mailto:hello@squareclouds.com"
+            href="mailto:contact@squarecloudsmc.com"
             className={`hidden md:flex items-center justify-center px-3 sm:px-6 py-2 h-[38px] sm:h-[42px] rounded-full text-[13px] sm:text-[15.5px] font-semibold transition-all duration-300 ${btnStyle}`}
           >
             Partner With Us
@@ -300,7 +300,7 @@ return (
             </nav>
 
             <a
-              href="mailto:hello@squareclouds.com"
+              href="mailto:contact@squarecloudsmc.com"
               onClick={() => setIsMobileMenuOpen(false)}
               className="mt-auto flex min-h-12 items-center justify-center rounded-full border border-blue-700 bg-blue-700 px-5 text-base font-bold text-white transition-colors hover:bg-blue-800"
             >

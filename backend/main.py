@@ -222,8 +222,8 @@ async def upload_image(
         filename = f"{uuid.uuid4().hex}.webp"
         image.save(UPLOADS_DIR / filename, format="webp", quality=85)
 
-        base_url = os.getenv("BASE_URL", "https://squarecloudsmc.com")
-        return {"url": f"{base_url}/uploads/{filename}"}
+        base_url = os.getenv("BASE_URL", "https://api.squarecloudsmc.com")
+        return {"url": f"{base_url}/api/uploads/{filename}"}
     except Exception as e:
         print(f"Error Upload: {e}")
         raise HTTPException(

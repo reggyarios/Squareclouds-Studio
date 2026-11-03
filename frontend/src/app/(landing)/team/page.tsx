@@ -203,7 +203,7 @@ export default function TeamPage() {
                 </h2>
               </div>
               <a
-                href="mailto:squarecloudsmc@gmail.com"
+                href="mailto:contact@squarecloudsmc.com"
                 className="group flex items-center gap-2 text-blue-600 font-bold hover:text-blue-700 transition-colors"
               >
                 Join the team{" "}
@@ -369,7 +369,7 @@ export default function TeamPage() {
               and create games that reflect your creativity, we want to hear from you.
             </p>
             <a
-              href="mailto:squarecloudsmc@gmail.com"
+              href="mailto:contact@squarecloudsmc.com"
               className="px-10 py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-full transition-all shadow-[0_8px_20px_rgba(37,99,235,0.2)] hover:-translate-y-1"
             >
               Apply Now

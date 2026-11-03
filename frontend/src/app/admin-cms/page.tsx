@@ -202,39 +202,47 @@ export default function AdminLandingCMS() {
     e: React.ChangeEvent<HTMLInputElement>,
     isEditMode: boolean = false
   ) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
     setIsUploading(true);
-    setPesan({ type: "info", text: "Menambahkan gambar ke galeri..." });
-    const formData = new FormData();
-    formData.append("file", file);
+    setPesan({ type: "info", text: `Mengunggah ${files.length} gambar ke galeri...` });
     try {
-      const res = await fetch("https://api.squarecloudsmc.com/upload-image/", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${getToken()}` },
-        body: formData,
-      });
-      if (checkAPIUnauthorized(res)) return; // Cek Auto-Logout
-
-      const data = await res.json();
-      if (res.ok) {
-        if (isEditMode) {
-          const currentUrls = editingItem.gallery_urls
-            ? editingItem.gallery_urls.split(",").filter(Boolean)
-            : [];
-          currentUrls.push(data.url);
-          setEditingItem({ ...editingItem, gallery_urls: currentUrls.join(",") });
-        } else {
-          const currentUrls = newCommission.gallery_urls
-            ? newCommission.gallery_urls.split(",").filter(Boolean)
-            : [];
-          currentUrls.push(data.url);
-          setNewCommission({ ...newCommission, gallery_urls: currentUrls.join(",") });
-        }
-        setPesan({ type: "success", text: "Gambar galeri ditambahkan!" });
+      let currentUrls = [];
+      if (isEditMode) {
+        currentUrls = editingItem.gallery_urls
+          ? editingItem.gallery_urls.split(",").filter(Boolean)
+          : [];
+      } else {
+        currentUrls = newCommission.gallery_urls
+          ? newCommission.gallery_urls.split(",").filter(Boolean)
+          : [];
       }
+
+      for (let i = 0; i < files.length; i++) {
+        const formData = new FormData();
+        formData.append("file", files[i]);
+        const res = await fetch("https://api.squarecloudsmc.com/upload-image/", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${getToken()}` },
+          body: formData,
+        });
+        if (checkAPIUnauthorized(res)) return;
+        const data = await res.json();
+        if (res.ok) {
+          currentUrls.push(data.url);
+        } else {
+          throw new Error("Gagal mengunggah salah satu gambar.");
+        }
+      }
+
+      if (isEditMode) {
+        setEditingItem({ ...editingItem, gallery_urls: currentUrls.join(",") });
+      } else {
+        setNewCommission({ ...newCommission, gallery_urls: currentUrls.join(",") });
+      }
+      setPesan({ type: "success", text: "Semua gambar galeri berhasil ditambahkan!" });
     } catch (err) {
-      setPesan({ type: "error", text: "Gagal upload gambar galeri." });
+      setPesan({ type: "error", text: "Gagal upload beberapa gambar galeri." });
     } finally {
       setIsUploading(false);
     }
@@ -469,6 +477,7 @@ export default function AdminLandingCMS() {
                   <input
                     type="file"
                     accept="image/*"
+                    multiple
                     onChange={(e) => handleGalleryUpload(e, false)}
                     className="text-xs"
                   />
@@ -1256,6 +1265,7 @@ export default function AdminLandingCMS() {
                   <input
                     type="file"
                     accept="image/*"
+                    multiple
                     onChange={(e) => handleGalleryUpload(e, true)}
                     className="text-xs"
                   />

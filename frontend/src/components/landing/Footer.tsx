@@ -110,7 +110,7 @@ export function Footer() {
               </h4>
               <FooterLink href="/#manifesto">Our Story</FooterLink>
               <FooterLink href="/team">Team</FooterLink>
-              <FooterLink href="mailto:squarecloudsmc@gmail.com">Partner With Us</FooterLink>
+              <FooterLink href="mailto:contact@squarecloudsmc.com">Partner With Us</FooterLink>
             </div>
 
           </div>
