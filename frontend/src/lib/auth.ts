@@ -1,4 +1,5 @@
 // Helper autentikasi untuk halaman portal (admin & kreator).
+import { apiErrorMessage, apiUrl } from "@/lib/api";
 
 /** Header Authorization dari token login, digabung dengan header tambahan. */
 export function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -22,4 +23,20 @@ export function guard(res: Response, onUnauthorized: () => void = logout): Respo
     throw new Error("Sesi berakhir, silakan login ulang.");
   }
   return res;
+}
+
+/**
+ * Panggil endpoint terproteksi dan kembalikan JSON-nya. 401/403 -> login ulang
+ * (lihat `guard`), error lain -> Error berisi `detail` dari server.
+ */
+export async function apiFetch(
+  path: string,
+  init: RequestInit = {},
+  onUnauthorized: () => void = logout
+) {
+  const headers = authHeaders(init.body ? { "Content-Type": "application/json" } : {});
+  const res = guard(await fetch(apiUrl(path), { ...init, headers }), onUnauthorized);
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(apiErrorMessage(data, `Permintaan gagal (${res.status}).`));
+  return data;
 }
