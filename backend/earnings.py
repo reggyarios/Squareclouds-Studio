@@ -15,13 +15,13 @@ Angka dihitung tanpa pembulatan; pembulatan ke 2 desimal hanya di output (`money
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import and_, case, func, literal_column, or_
+from sqlalchemy import and_, func, literal_column
 from sqlalchemy.orm import Session
 
 import models
 
 # Bagian gross yang dibayar Pathway ke Squareclouds. Hanya untuk baris
-# daily_sales lama yang belum punya gross_usd/net80_usd dari Pathway.
+# daily_sales lama yang gross_usd/net80_usd-nya masih NULL.
 PATHWAY_NET_SHARE = 0.8
 
 # Metode payout yang dibayar dalam rupiah (dikonversi dengan idr_rate).
@@ -84,14 +84,13 @@ def content_rows(db: Session, user_id: int | None = None, month: str | None = No
     """Penjualan per (konten, bulan): units, gross_usd, net80_usd, net_usd.
 
     user_id: hanya konten yang tertaut ke kreator itu. month (YYYY-MM): hanya
-    bulan itu. Baris yang gross_usd dan net80_usd-nya masih 0 (belum disinkron
-    ulang sejak kolom itu ada) memakai fallback harga konten × unit.
+    bulan itu. Kolom yang masih NULL (baris belum disinkron ulang sejak kolom
+    itu ada) memakai fallback harga konten × unit; 0 dari Pathway tetap 0.
     """
     sale = models.DailySales
     # literal_column supaya substr di SELECT dan GROUP BY identik; PostgreSQL
     # menolak kalau argumennya jadi bind parameter yang berbeda.
     month_col = func.substr(sale.date, literal_column("1"), literal_column("7"))
-    from_pathway = or_(sale.gross_usd != 0, sale.net80_usd != 0)
     fallback_gross = sale.quantity * models.Content.price
 
     query = (
@@ -99,8 +98,8 @@ def content_rows(db: Session, user_id: int | None = None, month: str | None = No
             sale.content_id,
             month_col.label("month"),
             func.sum(sale.quantity),
-            func.sum(case((from_pathway, sale.gross_usd), else_=fallback_gross)),
-            func.sum(case((from_pathway, sale.net80_usd), else_=fallback_gross * PATHWAY_NET_SHARE)),
+            func.sum(func.coalesce(sale.gross_usd, fallback_gross)),
+            func.sum(func.coalesce(sale.net80_usd, fallback_gross * PATHWAY_NET_SHARE)),
         )
         .join(models.Content, models.Content.id == sale.content_id)
         .group_by(sale.content_id, month_col)

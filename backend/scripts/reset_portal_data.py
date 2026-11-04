@@ -1,8 +1,8 @@
 """Kosongkan data portal kreator supaya pathway_bot.py bisa mulai dari nol.
 
-DIHAPUS : daily_sales, sales_transactions, earning_history, creator_splits,
-          contents, dan semua user dengan role selain "Admin".
-TETAP   : akun Admin dan semua tabel CMS (cms_*).
+DIHAPUS : daily_sales, sales_transactions, earning_history, payouts,
+          creator_splits, contents, dan semua user dengan role selain "Admin".
+TETAP   : akun Admin, settings (fee PayPal & kurs), dan semua tabel CMS (cms_*).
 
 Jalankan dari folder backend:
     venv/bin/python scripts/reset_portal_data.py
@@ -24,7 +24,7 @@ with engine.connect() as conn:
     counts = {
         t: conn.execute(text(f'SELECT COUNT(*) FROM "{t}"')).scalar()
         for t in ("daily_sales", "sales_transactions", "earning_history",
-                  "creator_splits", "contents")
+                  "payouts", "creator_splits", "contents")
     }
     counts["users (non-admin)"] = conn.execute(
         text("SELECT COUNT(*) FROM users WHERE role <> 'Admin'")
@@ -48,13 +48,15 @@ with engine.begin() as conn:
     conn.execute(text("DELETE FROM daily_sales"))
     conn.execute(text("DELETE FROM sales_transactions"))
     conn.execute(text("DELETE FROM earning_history"))
+    # Sebelum users: payouts.user_id (dan created_by) mengacu ke users.
+    conn.execute(text("DELETE FROM payouts"))
     conn.execute(text("DELETE FROM creator_splits"))
     conn.execute(text("DELETE FROM contents"))
     conn.execute(text("DELETE FROM users WHERE role <> 'Admin'"))
     for t in ("daily_sales", "sales_transactions", "earning_history",
-              "creator_splits", "contents"):
+              "payouts", "creator_splits", "contents"):
         conn.execute(text(
             f"SELECT setval(pg_get_serial_sequence('{t}', 'id'), 1, false)"
         ))
 
-print("Selesai. Data portal kosong, admin & CMS tetap utuh.")
+print("Selesai. Data portal (termasuk riwayat payout) kosong; admin, settings & CMS tetap utuh.")

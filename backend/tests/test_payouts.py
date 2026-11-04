@@ -111,7 +111,7 @@ def test_fallback_price_for_rows_without_pathway_amounts(client):
     # Angka Royal Mansion dari §7: 6.396 unit × $0,75, split 30%.
     with SessionLocal() as db:
         creator = add_creator(db)
-        add_content(db, splits=[(creator, 30)], sales=[("2026-09-01", 6000, 0, 0), ("2026-09-02", 396, 0, 0)])
+        add_content(db, splits=[(creator, 30)], sales=[("2026-09-01", 6000, None, None), ("2026-09-02", 396, None, None)])
 
         [row] = earnings.content_rows(db)
         assert row["gross_usd"] == pytest.approx(4797.0)
@@ -124,10 +124,20 @@ def test_pathway_amounts_win_over_price(client):
     with SessionLocal() as db:
         creator = add_creator(db)
         # Harga konten 0,75 tapi Pathway melaporkan gross 1,00 (mis. diskon/kurs).
-        add_content(db, splits=[(creator, 50)], sales=[("2026-10-01", 1, 1.0, 0.8), ("2026-10-02", 2, 0, 0)])
+        add_content(db, splits=[(creator, 50)], sales=[("2026-10-01", 1, 1.0, 0.8), ("2026-10-02", 2, None, None)])
         [row] = earnings.content_rows(db)
         assert row["gross_usd"] == pytest.approx(1.0 + 2 * 0.75)
         assert row["net80_usd"] == pytest.approx(0.8 + 2 * 0.75 * 0.8)
+
+
+def test_zero_from_pathway_is_not_replaced_by_price(client):
+    with SessionLocal() as db:
+        creator = add_creator(db)
+        # Hari promo gratis: unit terjual, Pathway melaporkan $0.
+        add_content(db, splits=[(creator, 30)], sales=[("2026-10-01", 50, 0.0, 0.0), ("2026-10-02", 10, 7.5, 6.0)])
+        [row] = earnings.content_rows(db)
+        assert (row["units"], row["gross_usd"], row["net80_usd"]) == (60, 7.5, 6.0)
+        assert earnings.creator_summary(db, creator, include_internal=False)["total_earned_usd"] == 1.71  # 6 × 0,95 × 30%
 
 
 def test_content_rows_filters_by_user_and_month(client):
@@ -463,7 +473,9 @@ def test_me_payout_validation_per_method(client):
 
     res = put_payout(client, headers, "paypal", {"paypal_email": " Kreator@PayPal.com ", "extra": "dibuang"})
     assert res.status_code == 200, res.text
-    assert res.json()["payout_details_masked"] == {"paypal_email": "**************.com"}
+    assert res.json()["payout_details_masked"] == {"paypal_email": "kr***@paypal.com"}
+    res = put_payout(client, headers, "paypal", {"paypal_email": "a@b.co"})
+    assert res.json()["payout_details_masked"] == {"paypal_email": "a***@b.co"}
 
     res = put_payout(client, headers, "bank", {**BANK, "account_number": "1234-5678 90"})
     assert res.status_code == 200, res.text

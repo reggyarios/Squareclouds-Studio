@@ -442,9 +442,10 @@ def upsert(offers: list[dict], catalog: list[dict], per_product: dict[str, list[
                 row = existing.get(key)
                 if row:
                     # Satu baris dihitung sekali walau beberapa kolomnya berubah.
+                    # NULL (belum pernah disinkron) selalu diisi, juga dengan 0.
                     if (row.quantity != units
-                            or abs((row.gross_usd or 0) - gross) > 0.001
-                            or abs((row.net80_usd or 0) - net80) > 0.001):
+                            or row.gross_usd is None or abs(row.gross_usd - gross) > 0.001
+                            or row.net80_usd is None or abs(row.net80_usd - net80) > 0.001):
                         row.quantity = units
                         row.gross_usd = gross
                         row.net80_usd = net80

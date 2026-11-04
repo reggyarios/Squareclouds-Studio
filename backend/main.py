@@ -979,7 +979,8 @@ ACCOUNT_NUMBER_RE = re.compile(r"\d{6,20}")
 # Nomor HP Indonesia 10–13 digit, setelah awalan +62/62 diganti 0.
 PHONE_RE = re.compile(r"08\d{8,11}")
 MAX_PAYOUT_TEXT_LENGTH = 100
-# Di respons kreator hanya 4 karakter terakhir field ini yang terlihat.
+# Field yang dimask di respons kreator: email jadi "re***@gmail.com", nomor
+# rekening/HP hanya 4 digit terakhir yang terlihat.
 MASKED_PAYOUT_FIELDS = ("paypal_email", "account_number", "phone")
 
 
@@ -992,13 +993,20 @@ def mask_value(value: str) -> str:
     return "*" * max(len(value) - 4, 0) + value[-4:]
 
 
+def mask_email(value: str) -> str:
+    local, at, domain = value.partition("@")
+    return f"{local[:2]}***@{domain}" if at else mask_value(value)
+
+
 def mask_payout_details(details: dict | None) -> dict | None:
     if details is None:
         return None
-    return {
-        key: mask_value(str(value)) if key in MASKED_PAYOUT_FIELDS and value else value
-        for key, value in details.items()
-    }
+    masked = {}
+    for key, value in details.items():
+        if key in MASKED_PAYOUT_FIELDS and value:
+            value = mask_email(str(value)) if key == "paypal_email" else mask_value(str(value))
+        masked[key] = value
+    return masked
 
 
 def clean_payout_details(method: str, raw: dict) -> dict:

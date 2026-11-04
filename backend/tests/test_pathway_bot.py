@@ -32,11 +32,27 @@ def test_upsert_stores_and_updates_gross_and_net80(client, capsys):
     assert sales_rows() == {"2026-10-01": (4, 3.75, 3.0), "2026-10-02": (2, 1.5, 1.2)}
     assert "daily_sales: +0 baru, 1 diperbarui" in capsys.readouterr().out
 
-    # Baris lama (sebelum kolom baru diisi) ikut terisi saat sinkron ulang.
+    # Baris lama (kolom baru masih NULL) ikut terisi saat sinkron ulang.
     with SessionLocal() as db:
         row = db.query(models.DailySales).filter(models.DailySales.date == "2026-10-02").one()
-        row.gross_usd = row.net80_usd = 0
+        row.gross_usd = row.net80_usd = None
         db.commit()
     pathway_bot.upsert([], CATALOG, {PID: days}, dry_run=False)
     assert sales_rows()["2026-10-02"] == (2, 1.5004, 1.2)
+    assert "daily_sales: +0 baru, 1 diperbarui" in capsys.readouterr().out
+
+
+def test_upsert_writes_zero_amounts_from_pathway(client, capsys):
+    # Unit terjual tapi Pathway melaporkan $0 (mis. promo gratis): disimpan 0,
+    # bukan NULL, supaya earnings.py tidak memakai fallback harga.
+    pathway_bot.upsert([], CATALOG, {PID: [day("2026-10-01", 3, 0, 0)]}, dry_run=False)
+    assert sales_rows() == {"2026-10-01": (3, 0.0, 0.0)}
+
+    with SessionLocal() as db:
+        row = db.query(models.DailySales).one()
+        row.gross_usd = row.net80_usd = None
+        db.commit()
+    capsys.readouterr()
+    pathway_bot.upsert([], CATALOG, {PID: [day("2026-10-01", 3, 0, 0)]}, dry_run=False)
+    assert sales_rows() == {"2026-10-01": (3, 0.0, 0.0)}
     assert "daily_sales: +0 baru, 1 diperbarui" in capsys.readouterr().out

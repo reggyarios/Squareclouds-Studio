@@ -11,8 +11,17 @@ gross_usd/net80_usd baris daily_sales lama ikut terisi.
 Kolom baru:
     daily_sales.gross_usd   field `gross` per hari dari Pathway
     daily_sales.net80_usd   field `creator` per hari dari Pathway (80% gross)
+                            Keduanya nullable tanpa default: NULL = belum
+                            disinkron (earnings.py memakai fallback harga),
+                            0 = Pathway memang melaporkan $0.
     users.payout_method     paypal | bank | ewallet
     users.payout_details    JSON tujuan payout
+
+Versi awal skrip ini membuat kedua kolom daily_sales NOT NULL DEFAULT 0. Kalau
+kolom seperti itu ditemukan, NOT NULL dan DEFAULT-nya dibuang, lalu baris yang
+gross_usd DAN net80_usd-nya 0 di-set NULL (nilai default yang tidak bisa
+dibedakan dari "belum disinkron"); `pathway_bot.py --full` mengisinya lagi
+dengan angka Pathway, termasuk 0 yang asli.
 
 Tabel baru:
     settings    pengaturan admin; di-seed paypal_fee_pct dan idr_rate
@@ -33,9 +42,10 @@ import models  # noqa: E402
 if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
     sys.exit("DATABASE_URL belum menunjuk ke PostgreSQL. Batal.")
 
+AMOUNT_COLUMNS = ("gross_usd", "net80_usd")
 COLUMNS = [
-    ("daily_sales", "gross_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
-    ("daily_sales", "net80_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+    ("daily_sales", "gross_usd", "DOUBLE PRECISION"),
+    ("daily_sales", "net80_usd", "DOUBLE PRECISION"),
     ("users", "payout_method", "VARCHAR"),
     ("users", "payout_details", "VARCHAR"),
 ]
@@ -43,9 +53,36 @@ COLUMNS = [
 now = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 with engine.begin() as conn:
+    # Dicek sebelum ADD COLUMN: kolom NOT NULL hanya ada kalau versi awal
+    # skrip ini pernah dijalankan.
+    legacy_not_null = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'daily_sales' "
+            "AND column_name = 'gross_usd' AND is_nullable = 'NO'"
+        )
+    ).first() is not None
+
     for table, name, typ in COLUMNS:
         conn.execute(text(f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "{name}" {typ}'))
         print(f"{table}.{name:20} ok")
+
+    for name in AMOUNT_COLUMNS:
+        conn.execute(
+            text(
+                f'ALTER TABLE daily_sales ALTER COLUMN "{name}" DROP NOT NULL, '
+                f'ALTER COLUMN "{name}" DROP DEFAULT'
+            )
+        )
+    print("daily_sales.gross_usd/net80_usd nullable tanpa default ok")
+    if legacy_not_null:
+        reset = conn.execute(
+            text(
+                "UPDATE daily_sales SET gross_usd = NULL, net80_usd = NULL "
+                "WHERE gross_usd = 0 AND net80_usd = 0"
+            )
+        ).rowcount
+        print(f"  {reset} baris bernilai default 0 di-set NULL (diisi lagi oleh pathway_bot.py --full)")
     Base.metadata.create_all(
         bind=conn,
         tables=[models.Setting.__table__, models.Payout.__table__],

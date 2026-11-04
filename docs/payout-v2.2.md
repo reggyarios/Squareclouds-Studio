@@ -16,13 +16,15 @@ IDR            = USD × idr_rate                    (hanya untuk payout non-PayP
 ```
 
 `paypal_fee_pct` dan `idr_rate` diatur admin (tabel `settings`), bukan hardcoded.
-Selalu pakai angka `gross`/`net80` **dari Pathway** bila ada; fallback `price × unit × 0.8` hanya jika baris lama belum punya nilainya.
+Selalu pakai angka `gross`/`net80` **dari Pathway** bila ada; fallback `price × unit × 0.8` hanya jika nilainya NULL
+(baris lama yang belum disinkron). 0 dari Pathway dihormati sebagai 0.
 
 ## 1. Database
 
 Model & kolom baru (semua lewat `backend/scripts/migrate_payouts.py`, pola ADD COLUMN IF NOT EXISTS + `create_all`, aman diulang):
 
-- `daily_sales`: `gross_usd Float NOT NULL DEFAULT 0`, `net80_usd Float NOT NULL DEFAULT 0`.
+- `daily_sales`: `gross_usd Float NULL`, `net80_usd Float NULL`, tanpa default (NULL = belum disinkron).
+  Kalau kolom sudah ada sebagai NOT NULL DEFAULT 0 (versi awal migrasi): DROP NOT NULL / DROP DEFAULT.
 - `settings` (model `Setting`): `key String PK`, `value String NOT NULL`, `updated_at String`.
   Seed jika belum ada: `paypal_fee_pct=5`, `idr_rate=16500`.
 - `users`: `payout_method String NULL` (`paypal` | `bank` | `ewallet`), `payout_details String NULL` (JSON):
@@ -66,7 +68,7 @@ Admin (`require_admin`):
   `squareclouds_share_usd` per konten & per bulan. Bentuk respons lama yang dipakai tab Laporan boleh diubah, sesuaikan frontend-nya.
 
 Kreator (role Creator, Active):
-- `GET /me/payout` → `{payout_method, payout_details_masked}` (nomor rekening/HP/email dimask: 4 karakter terakhir terlihat).
+- `GET /me/payout` → `{payout_method, payout_details_masked}` (nomor rekening/HP dimask: 4 karakter terakhir terlihat; email PayPal: 2 karakter pertama + `***@` + domain, mis. `re***@gmail.com`).
 - `PUT /me/payout` body `{payout_method, payout_details}` dengan validasi per metode (email valid; nomor rekening 6–20 digit;
   nomor HP Indonesia 10–13 digit; provider dari daftar; `account_name` wajib untuk bank/ewallet).
 - `GET /creator-dashboard/`: ganti/lengkapi dengan `creator_summary(include_internal=False)`. Hapus field lama yang membocorkan

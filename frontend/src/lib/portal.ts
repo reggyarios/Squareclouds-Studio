@@ -29,7 +29,7 @@ export const PAYOUT_FIELD_LABEL: Record<string, string> = {
 // Sama dengan EWALLET_PROVIDERS di backend/main.py.
 export const EWALLET_PROVIDERS = ["DANA", "GoPay", "OVO", "ShopeePay"];
 // Sama dengan MASKED_PAYOUT_FIELDS di backend/main.py: kreator hanya melihat
-// 4 karakter terakhirnya, jadi harus diisi ulang saat mengubah data payout.
+// versi termask-nya, jadi harus diisi ulang saat mengubah data payout.
 export const MASKED_PAYOUT_FIELDS = ["paypal_email", "account_number", "phone"];
 
 // Format tampilan saja; semua angka uang dihitung di backend/earnings.py.

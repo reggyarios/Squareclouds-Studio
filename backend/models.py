@@ -366,21 +366,12 @@ class DailySales(Base):
     )
 
     # Dari Pathway per hari: field `gross` (harga × unit) dan field `creator`
-    # (80% gross, yang diterima Squareclouds dari Pathway). 0 untuk baris
-    # lama yang belum disinkron ulang; earnings.py memakai fallback harga.
-    gross_usd = Column(
-        Float,
-        nullable=False,
-        default=0.0,
-        server_default="0",
-    )
+    # (80% gross, yang diterima Squareclouds dari Pathway). NULL = baris lama
+    # yang belum disinkron ulang; hanya itu yang memakai fallback harga di
+    # earnings.py. 0 dari Pathway berarti memang $0.
+    gross_usd = Column(Float, nullable=True)
 
-    net80_usd = Column(
-        Float,
-        nullable=False,
-        default=0.0,
-        server_default="0",
-    )
+    net80_usd = Column(Float, nullable=True)
 
     # Relationship
     content = relationship(
