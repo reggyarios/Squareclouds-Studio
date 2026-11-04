@@ -435,14 +435,23 @@ def upsert(offers: list[dict], catalog: list[dict], per_product: dict[str, list[
                     c.tier = min(TIER_PRICE, key=lambda t: abs(TIER_PRICE[t] - c.price))
             for d in days:
                 units = int(d.get("units", 0))
+                # `creator` = 80% gross, yang diterima Squareclouds dari Pathway.
+                gross = float(d.get("gross", 0))
+                net80 = float(d.get("creator", 0))
                 key = (d["date"], c.id)
                 row = existing.get(key)
                 if row:
-                    if row.quantity != units:
+                    # Satu baris dihitung sekali walau beberapa kolomnya berubah.
+                    if (row.quantity != units
+                            or abs((row.gross_usd or 0) - gross) > 0.001
+                            or abs((row.net80_usd or 0) - net80) > 0.001):
                         row.quantity = units
+                        row.gross_usd = gross
+                        row.net80_usd = net80
                         upd += 1
                 elif units > 0:
-                    db.add(models.DailySales(date=d["date"], content_id=c.id, quantity=units))
+                    db.add(models.DailySales(date=d["date"], content_id=c.id, quantity=units,
+                                             gross_usd=gross, net80_usd=net80))
                     ins += 1
 
         log(f"contents: {len(offers)} offer diproses | daily_sales: +{ins} baru, {upd} diperbarui")
