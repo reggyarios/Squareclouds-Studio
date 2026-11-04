@@ -6,10 +6,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from jose import JWTError, jwt
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from html import escape
 from pathlib import Path
 import os
 import re
+import secrets
 import uuid
 import io
 import json
@@ -19,6 +21,7 @@ from database import create_tables, SessionLocal
 import models
 import schemas
 import auth
+import mailer
 from utils.file_storage import delete_upload, extract_upload_path
 
 
@@ -256,9 +259,12 @@ def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
+    # Email baru selalu disimpan lowercase; lower() di kolom juga mencocokkan
+    # akun lama yang tersimpan dengan huruf besar.
+    email = form_data.username.strip().lower()
     user = (
         db.query(models.User)
-        .filter(models.User.email == form_data.username)
+        .filter(func.lower(models.User.email) == email)
         .first()
     )
 
@@ -287,27 +293,193 @@ def login(
 
 
 # ============================================================================
-# REGISTER
+# INVITATIONS & REGISTER
 # ============================================================================
 
 JOB_TITLES = ("Builder", "Skin Artist", "Developer", "Keyart Artist", "Other")
 EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 MIN_PASSWORD_LENGTH = 8
+INVITATION_VALID_DAYS = 7
+DEFAULT_PORTAL_URL = "https://creator.squarecloudsmc.com"
+
+
+def iso_utc(moment: datetime) -> str:
+    return moment.isoformat(timespec="seconds")
+
+
+def is_invitation_expired(invitation: models.Invitation) -> bool:
+    return datetime.fromisoformat(invitation.expires_at) <= datetime.now(timezone.utc)
+
+
+def email_registered(db: Session, email: str) -> bool:
+    return (
+        db.query(models.User.id)
+        .filter(func.lower(models.User.email) == email)
+        .first()
+        is not None
+    )
+
+
+def get_valid_invitation(db: Session, token: str | None) -> models.Invitation:
+    invitation = (
+        db.query(models.Invitation).filter(models.Invitation.token == token).first()
+        if token
+        else None
+    )
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Undangan tidak ditemukan")
+    if invitation.used_at:
+        raise HTTPException(status_code=410, detail="Undangan sudah dipakai")
+    if is_invitation_expired(invitation):
+        raise HTTPException(status_code=410, detail="Undangan sudah kedaluwarsa")
+    return invitation
+
+
+def send_invitation_email(email: str, token: str) -> bool:
+    portal_url = (os.getenv("PORTAL_URL", "").strip() or DEFAULT_PORTAL_URL).rstrip("/")
+    link = f"{portal_url}/register?token={token}"
+    text = (
+        "Halo,\n\n"
+        "Anda diundang bergabung ke Creator Portal SquareClouds. "
+        "Buka link berikut untuk membuat akun:\n\n"
+        f"{link}\n\n"
+        f"Link ini berlaku {INVITATION_VALID_DAYS} hari. Setelah mendaftar, "
+        "akun Anda bisa dipakai begitu disetujui admin.\n\n"
+        "Salam,\nSquareClouds"
+    )
+    html = f"""\
+<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937;line-height:1.6">
+  <p>Halo,</p>
+  <p>Anda diundang bergabung ke <b>Creator Portal SquareClouds</b>.
+     Klik tombol di bawah untuk membuat akun.</p>
+  <p><a href="{escape(link)}" style="display:inline-block;padding:10px 20px;border-radius:8px;
+     background:#2563eb;color:#ffffff;text-decoration:none;font-weight:bold">Buat akun</a></p>
+  <p style="font-size:12px;color:#6b7280">Atau buka link ini: {escape(link)}</p>
+  <p>Link ini berlaku {INVITATION_VALID_DAYS} hari. Setelah mendaftar,
+     akun Anda bisa dipakai begitu disetujui admin.</p>
+  <p>Salam,<br>SquareClouds</p>
+</div>"""
+    return mailer.send_mail(email, "Undangan Creator Portal SquareClouds", html, text)
+
+
+@app.post("/invitations", status_code=status.HTTP_201_CREATED)
+def create_invitation(
+    payload: schemas.InvitationCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    email = payload.email.strip().lower()
+
+    if not EMAIL_RE.fullmatch(email):
+        raise HTTPException(status_code=400, detail="Format email tidak valid.")
+    if email_registered(db, email):
+        raise HTTPException(status_code=400, detail="Email sudah terdaftar!")
+
+    # Undangan lama yang belum dipakai (aktif maupun kedaluwarsa) diganti
+    # yang baru, jadi tiap email hanya punya satu link yang berlaku.
+    db.query(models.Invitation).filter(
+        models.Invitation.email == email,
+        models.Invitation.used_at.is_(None),
+    ).delete(synchronize_session=False)
+
+    now = datetime.now(timezone.utc)
+    token = secrets.token_urlsafe(32)
+    db.add(
+        models.Invitation(
+            email=email,
+            token=token,
+            invited_by=current_user.id,
+            created_at=iso_utc(now),
+            expires_at=iso_utc(now + timedelta(days=INVITATION_VALID_DAYS)),
+        )
+    )
+    db.commit()
+
+    try:
+        sent = send_invitation_email(email, token)
+    except Exception as e:
+        print(f"Invitation Mail Error: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Undangan tersimpan, tetapi email gagal dikirim. Coba Kirim ulang.",
+        )
+
+    return {
+        "message": f"Undangan terkirim ke {email}." if sent else f"Undangan untuk {email} dibuat.",
+        "sent": sent,
+    }
+
+
+@app.get("/invitations")
+def get_invitations(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    invitations = (
+        db.query(models.Invitation)
+        .filter(models.Invitation.used_at.is_(None))
+        .order_by(models.Invitation.created_at.desc())
+        .all()
+    )
+    # Token sengaja tidak dikembalikan: admin tidak boleh bisa mendaftarkan
+    # (dan tahu password) akun kreator.
+    return {
+        "data": [
+            {
+                "id": i.id,
+                "email": i.email,
+                "created_at": i.created_at,
+                "expires_at": i.expires_at,
+                "expired": is_invitation_expired(i),
+            }
+            for i in invitations
+        ]
+    }
+
+
+@app.delete("/invitations/{invitation_id}")
+def delete_invitation(
+    invitation_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    invitation = (
+        db.query(models.Invitation)
+        .filter(
+            models.Invitation.id == invitation_id,
+            models.Invitation.used_at.is_(None),
+        )
+        .first()
+    )
+    if not invitation:
+        raise HTTPException(status_code=404, detail="Undangan tidak ditemukan")
+
+    email = invitation.email
+    db.delete(invitation)
+    db.commit()
+    return {"message": f"Undangan untuk {email} dibatalkan."}
+
+
+@app.get("/register/{token}")
+def check_invitation(token: str, db: Session = Depends(get_db)):
+    return {"email": get_valid_invitation(db, token).email}
 
 
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
+    invitation = get_valid_invitation(db, payload.token)
+    email = invitation.email.lower()
     name = payload.name.strip()
-    email = payload.email.strip()
     job_title = payload.job_title.strip()
 
-    if not name or not email or not payload.password or not job_title:
+    if not name or not payload.password or not job_title:
         raise HTTPException(
             status_code=400,
-            detail="Nama, email, password, dan job title wajib diisi.",
+            detail="Nama, password, dan job title wajib diisi.",
         )
-    if not EMAIL_RE.fullmatch(email):
-        raise HTTPException(status_code=400, detail="Format email tidak valid.")
     if len(payload.password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
             status_code=400,
@@ -315,13 +487,26 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
         )
     if job_title not in JOB_TITLES:
         raise HTTPException(status_code=400, detail="Job title tidak valid.")
-
-    if (
-        db.query(models.User.id)
-        .filter(func.lower(models.User.email) == email.lower())
-        .first()
-    ):
+    if email_registered(db, email):
         raise HTTPException(status_code=400, detail="Email sudah terdaftar!")
+
+    hashed_password = auth.get_password_hash(payload.password)
+    now = iso_utc(datetime.now(timezone.utc))
+
+    # Tandai undangan terpakai dan buat akun dalam satu transaksi. UPDATE
+    # bersyarat ini mengenai 0 baris kalau request lain sudah lebih dulu
+    # memakai token yang sama, jadi token tidak bisa dipakai dua kali.
+    claimed = (
+        db.query(models.Invitation)
+        .filter(
+            models.Invitation.id == invitation.id,
+            models.Invitation.used_at.is_(None),
+        )
+        .update({models.Invitation.used_at: now}, synchronize_session=False)
+    )
+    if claimed != 1:
+        db.rollback()
+        raise HTTPException(status_code=410, detail="Undangan sudah dipakai")
 
     try:
         db.add(
@@ -330,9 +515,9 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
                 email=email,
                 role="Creator",
                 job_title=job_title,
-                password=auth.get_password_hash(payload.password),
+                password=hashed_password,
                 account_status="Pending",
-                created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                created_at=now,
             )
         )
         db.commit()

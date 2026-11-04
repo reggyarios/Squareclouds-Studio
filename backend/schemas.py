@@ -5,9 +5,14 @@ from typing import Optional, List
 # SCHEMA PORTAL KREATOR
 # ==========================================
 
-class UserRegister(BaseModel):
-    name: str
+class InvitationCreate(BaseModel):
     email: str
+
+class UserRegister(BaseModel):
+    # Opsional supaya request tanpa token dijawab 404 "Undangan tidak
+    # ditemukan", bukan 422. Email diambil dari undangan, bukan dari body.
+    token: Optional[str] = None
+    name: str
     password: str
     job_title: str
 
