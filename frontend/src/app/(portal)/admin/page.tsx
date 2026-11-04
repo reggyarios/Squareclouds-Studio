@@ -1,12 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiErrorMessage, apiUrl } from "@/lib/api";
-import { authHeaders, guard } from "@/lib/auth";
-import { JOB_OPTIONS } from "@/lib/portal";
+import { apiFetch } from "@/lib/auth";
+import {
+  JOB_OPTIONS,
+  PAYOUT_FIELDS,
+  PAYOUT_FIELD_LABEL,
+  PAYOUT_METHOD_LABEL,
+  type PayoutMethod,
+  formatIdr,
+  formatMonth,
+  formatUsd,
+} from "@/lib/portal";
 
-type Tab = "undangan" | "kreator" | "konten" | "laporan";
+type Tab = "undangan" | "kreator" | "konten" | "laporan" | "pengaturan";
 
 type Invitation = {
   id: number;
@@ -42,10 +50,78 @@ type Content = {
   pathway_status: string | null;
   last_synced_at: string | null;
   units_total: number;
+  // All-time, dihitung backend/earnings.py.
+  gross_usd: number;
+  net_usd: number;
   splits: ContentSplit[];
 };
 
 type SplitRow = { user_id: number; name: string; checked: boolean; percentage: string };
+
+type Payout = {
+  id: number;
+  paid_at: string;
+  amount_usd: number;
+  idr_rate: number | null;
+  amount_idr: number | null;
+  method: PayoutMethod;
+  note: string | null;
+  // Snapshot data payout saat dibayar.
+  details: Record<string, string> | null;
+  created_at: string;
+};
+
+// Respons /users/{id}/earnings (creator_summary versi admin).
+type CreatorEarnings = {
+  total_earned_usd: number;
+  total_paid_usd: number;
+  outstanding_usd: number;
+  idr_rate: number;
+  total_earned_idr: number | null;
+  total_paid_idr: number | null;
+  outstanding_idr: number | null;
+  by_content: {
+    content_id: number;
+    name: string;
+    status: string | null;
+    units: number;
+    gross_usd: number;
+    net_usd: number;
+    split_pct: number;
+    share_usd: number;
+  }[];
+  payouts: Payout[];
+  payout_method: PayoutMethod | null;
+  payout_details: Record<string, string> | null;
+};
+
+type PayoutForm = { amount: string; note: string; paid_at: string };
+
+type MoneyTotals = {
+  units: number;
+  gross_usd: number;
+  net80_usd: number;
+  net_usd: number;
+  creators_share_usd: number;
+  squareclouds_share_usd: number;
+};
+
+type ReportContent = MoneyTotals & {
+  content_id: number;
+  name: string;
+  status: string | null;
+  creators: { user_id: number; name: string; split_pct: number; share_usd: number }[];
+};
+
+// Respons /admin-reports/ (earnings.admin_overview).
+type Report = {
+  paypal_fee_pct: number;
+  totals: MoneyTotals;
+  by_content: ReportContent[];
+  by_month: (MoneyTotals & { month: string; by_content: ReportContent[] })[];
+};
+
+type SettingsForm = { paypal_fee_pct: string; idr_rate: string };
 
 const MAX_CREATOR_SPLIT = 80;
 
@@ -83,6 +159,29 @@ const formatDateTime = (value: string | null) => {
 
 const roundPct = (n: number) => Math.round(n * 1e6) / 1e6;
 
+// YYYY-MM-DD hari ini (zona waktu browser), untuk default tanggal bayar.
+const todayIso = () => new Date().toLocaleDateString("en-CA");
+
+const payoutDetailsText = (method: PayoutMethod, details: Record<string, string> | null) =>
+  (PAYOUT_FIELDS[method] || [])
+    .map((f) => details?.[f])
+    .filter(Boolean)
+    .join(" · ") || "-";
+
+// Sel Unit, Gross, Net, Bagian Kreator, Squareclouds di tabel laporan.
+function MoneyCells({ totals, strong = false }: { totals: MoneyTotals; strong?: boolean }) {
+  const cell = `px-6 py-3 text-sm text-right whitespace-nowrap ${strong ? "font-black" : "font-bold"}`;
+  return (
+    <>
+      <td className={`${cell} text-gray-700`}>{totals.units.toLocaleString("id-ID")}</td>
+      <td className={`${cell} text-gray-800`}>{formatUsd(totals.gross_usd)}</td>
+      <td className={`${cell} text-gray-800`}>{formatUsd(totals.net_usd)}</td>
+      <td className={`${cell} text-green-600`}>{formatUsd(totals.creators_share_usd)}</td>
+      <td className={`${cell} text-blue-600`}>{formatUsd(totals.squareclouds_share_usd)}</td>
+    </>
+  );
+}
+
 export default function AdminDashboard() {
   const router = useRouter();
   const [adminName, setAdminName] = useState("");
@@ -96,10 +195,24 @@ export default function AdminDashboard() {
 
   const [usersList, setUsersList] = useState<Creator[]>([]);
   const [contentsList, setContentsList] = useState<Content[]>([]);
-  const [reportsList, setReportsList] = useState<any[]>([]);
+  const [report, setReport] = useState<Report | null>(null);
 
   // State untuk filter bulan laporan
   const [filterBulan, setFilterBulan] = useState<string>("");
+
+  const [settingsForm, setSettingsForm] = useState<SettingsForm>({ paypal_fee_pct: "", idr_rate: "" });
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  // Panel Pendapatan & Payout satu kreator (data null = sedang dimuat).
+  const [earningsPanel, setEarningsPanel] = useState<{
+    user: Creator;
+    data: CreatorEarnings | null;
+    error: string;
+  } | null>(null);
+  const [payoutForm, setPayoutForm] = useState<PayoutForm>({ amount: "", note: "", paid_at: "" });
+  const [savingPayout, setSavingPayout] = useState(false);
+  const [deletingPayoutId, setDeletingPayoutId] = useState<number | null>(null);
+  const [payoutPesan, setPayoutPesan] = useState({ type: "", text: "" });
 
   const [pesan, setPesan] = useState({ type: "", text: "" });
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -118,13 +231,7 @@ export default function AdminDashboard() {
   // Semua endpoint admin wajib membawa token. 401/403 -> login ulang,
   // error lain -> Error berisi `detail` dari server.
   const api = useCallback(
-    async (path: string, init: RequestInit = {}) => {
-      const headers = authHeaders(init.body ? { "Content-Type": "application/json" } : {});
-      const res = guard(await fetch(apiUrl(path), { ...init, headers }), handleLogout);
-      const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(apiErrorMessage(data, `Permintaan gagal (${res.status}).`));
-      return data;
-    },
+    (path: string, init?: RequestInit) => apiFetch(path, init, handleLogout),
     [handleLogout]
   );
 
@@ -144,18 +251,19 @@ export default function AdminDashboard() {
   };
 
   const fetchReports = async () => {
-    const res = guard(
-      await fetch(apiUrl("/admin-reports/"), { headers: authHeaders() }),
-      handleLogout
+    const data: { data: Report } = await api("/admin-reports/");
+    setReport(data.data);
+    // Default: bulan terbaru (by_month urut dari yang terbaru). Pilihan admin
+    // dipertahankan selama bulan itu masih ada.
+    const months = data.data.by_month.map((m) => m.month);
+    setFilterBulan((current) =>
+      current && months.includes(current) ? current : (months[0] ?? "")
     );
-    const data = await res.json();
-    if (res.ok) {
-      setReportsList(data.data);
-      const months = Array.from(new Set(data.data.map((r: any) => r.bulan)))
-        .sort()
-        .reverse() as string[];
-      if (months.length > 0) setFilterBulan(months[0]);
-    }
+  };
+
+  const fetchSettings = async () => {
+    const data = await api("/settings");
+    setSettingsForm({ paypal_fee_pct: String(data.paypal_fee_pct), idr_rate: String(data.idr_rate) });
   };
 
   useEffect(() => {
@@ -167,7 +275,13 @@ export default function AdminDashboard() {
     }
 
     setAdminName(localStorage.getItem("name") || "Admin");
-    Promise.all([fetchInvitations(), fetchUsers(), fetchContents(), fetchReports()])
+    Promise.all([
+      fetchInvitations(),
+      fetchUsers(),
+      fetchContents(),
+      fetchReports(),
+      fetchSettings(),
+    ])
       .catch((err) => setPesan({ type: "error", text: errMsg(err) }))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -293,7 +407,7 @@ export default function AdminDashboard() {
     if (
       !confirm(
         `Hapus akun ${u.name} (${u.email}) secara permanen?\n\n${linkedText}\n` +
-          "Riwayat pendapatan kreator ini juga ikut dihapus. Tindakan ini tidak bisa dibatalkan."
+          "Riwayat payout kreator ini juga ikut dihapus. Tindakan ini tidak bisa dibatalkan."
       )
     )
       return;
@@ -320,6 +434,109 @@ export default function AdminDashboard() {
       () => updateUser(u.id, { account_status: next }),
       next === "Active" ? `${u.name} diaktifkan.` : `${u.name} dinonaktifkan.`
     );
+  };
+
+  // ==========================================================================
+  // PENDAPATAN & PAYOUT KREATOR
+  // ==========================================================================
+
+  const loadEarnings = async (u: Creator) => {
+    try {
+      const data: CreatorEarnings = await api(`/users/${u.id}/earnings`);
+      // Abaikan respons kalau panel sudah ditutup / pindah ke kreator lain.
+      setEarningsPanel((p) => (p && p.user.id === u.id ? { user: u, data, error: "" } : p));
+      setPayoutForm({
+        amount: data.outstanding_usd > 0 ? data.outstanding_usd.toFixed(2) : "",
+        note: "",
+        paid_at: todayIso(),
+      });
+    } catch (err) {
+      setEarningsPanel((p) => (p && p.user.id === u.id ? { ...p, error: errMsg(err) } : p));
+    }
+  };
+
+  const openEarnings = (u: Creator) => {
+    setEarningsPanel({ user: u, data: null, error: "" });
+    setPayoutPesan({ type: "", text: "" });
+    loadEarnings(u);
+  };
+
+  const handleRecordPayout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!earningsPanel) return;
+    const { user } = earningsPanel;
+    setSavingPayout(true);
+    setPayoutPesan({ type: "", text: "" });
+    try {
+      const data = await api("/payouts", {
+        method: "POST",
+        body: JSON.stringify({
+          user_id: user.id,
+          amount_usd: Number(payoutForm.amount),
+          note: payoutForm.note.trim() || null,
+          paid_at: payoutForm.paid_at || null,
+        }),
+      });
+      setPayoutPesan({ type: "success", text: data.message });
+      await loadEarnings(user);
+    } catch (err) {
+      setPayoutPesan({ type: "error", text: errMsg(err) });
+    } finally {
+      setSavingPayout(false);
+    }
+  };
+
+  const handleDeletePayout = async (p: Payout) => {
+    if (!earningsPanel) return;
+    if (
+      !confirm(
+        `Hapus payout ${formatUsd(p.amount_usd)} tanggal ${formatDate(p.paid_at)}?\n\n` +
+          "Gunakan hanya untuk koreksi salah input. Saldo tertunda kreator akan bertambah lagi."
+      )
+    )
+      return;
+    const { user } = earningsPanel;
+    setDeletingPayoutId(p.id);
+    setPayoutPesan({ type: "", text: "" });
+    try {
+      const data = await api(`/payouts/${p.id}`, { method: "DELETE" });
+      setPayoutPesan({ type: "success", text: data.message });
+      await loadEarnings(user);
+    } catch (err) {
+      setPayoutPesan({ type: "error", text: errMsg(err) });
+    } finally {
+      setDeletingPayoutId(null);
+    }
+  };
+
+  // ==========================================================================
+  // PENGATURAN
+  // ==========================================================================
+
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingSettings(true);
+    setPesan({ type: "", text: "" });
+    try {
+      const data = await api("/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          paypal_fee_pct: Number(settingsForm.paypal_fee_pct),
+          idr_rate: Number(settingsForm.idr_rate),
+        }),
+      });
+      setSettingsForm({
+        paypal_fee_pct: String(data.data.paypal_fee_pct),
+        idr_rate: String(data.data.idr_rate),
+      });
+      setPesan({ type: "success", text: data.message });
+      // Gross/net konten dan laporan bergantung pada fee PayPal.
+      await Promise.all([fetchContents(), fetchReports()]);
+    } catch (err) {
+      setPesan({ type: "error", text: errMsg(err) });
+    } finally {
+      setSavingSettings(false);
+    }
   };
 
   // ==========================================================================
@@ -399,52 +616,23 @@ export default function AdminDashboard() {
   // LAPORAN
   // ==========================================================================
 
-  // --- LOGIKA GROUPING LAPORAN HARIAN JADI 1 BARIS PER BULAN ---
-  const availableMonths = Array.from(new Set(reportsList.map((r) => r.bulan)));
-  const filteredReportsList = filterBulan
-    ? reportsList.filter((tx) => tx.bulan === filterBulan)
-    : reportsList;
+  // Semua angka sudah dihitung backend (earnings.admin_overview): per bulan
+  // (urut terbaru) dengan rincian per konten, plus total keseluruhan.
+  const reportMonths = report?.by_month ?? [];
+  const availableMonths = reportMonths.map((m) => m.month);
+  const shownMonths = filterBulan
+    ? reportMonths.filter((m) => m.month === filterBulan)
+    : reportMonths;
+  const shownTotals: MoneyTotals | null = filterBulan
+    ? (shownMonths[0] ?? null)
+    : (report?.totals ?? null);
 
-  const groupedReportsMap: { [key: string]: any } = {};
-
-  filteredReportsList.forEach((tx) => {
-    const bulanKey = tx.bulan;
-    if (!groupedReportsMap[bulanKey]) {
-      groupedReportsMap[bulanKey] = {
-        bulan: bulanKey,
-        items: [],
-        totalGross: 0,
-        totalSqRevenue: 0,
-        creatorBreakdownsMap: {},
-      };
-    }
-
-    groupedReportsMap[bulanKey].items.push({
-      nama_konten: tx.nama_konten,
-      total_qty: tx.total_qty,
-    });
-
-    groupedReportsMap[bulanKey].totalGross += tx.gross;
-    groupedReportsMap[bulanKey].totalSqRevenue += tx.sq_revenue;
-
-    tx.creator_breakdown.forEach((cb: string) => {
-      const match = cb.match(/^(.+?)\s*\((.+?)\):\s*\$(.+)$/);
-      if (match) {
-        const [, cName, cPercent, cAmt] = match;
-        const key = `${cName} (${cPercent})`;
-        const val = parseFloat(cAmt);
-        groupedReportsMap[bulanKey].creatorBreakdownsMap[key] =
-          (groupedReportsMap[bulanKey].creatorBreakdownsMap[key] || 0) + val;
-      } else {
-        groupedReportsMap[bulanKey].creatorBreakdownsMap[cb] =
-          groupedReportsMap[bulanKey].creatorBreakdownsMap[cb] || 0;
-      }
-    });
-  });
-
-  const groupedReportsList = Object.values(groupedReportsMap).sort((a: any, b: any) =>
-    b.bulan.localeCompare(a.bulan)
-  );
+  const earningsData = earningsPanel?.data ?? null;
+  // Sama dengan syarat POST /payouts di backend.
+  const canRecordPayout =
+    !!earningsData?.payout_method &&
+    earningsPanel?.user.account_status === "Active" &&
+    earningsData.outstanding_usd > 0;
 
   if (loading)
     return (
@@ -485,6 +673,9 @@ export default function AdminDashboard() {
             className={navClass("laporan")}
           >
             Laporan Penjualan
+          </button>
+          <button onClick={() => switchTab("pengaturan")} className={navClass("pengaturan")}>
+            Pengaturan
           </button>
         </nav>
         <div className="mt-8 pt-6 border-t border-gray-100">
@@ -752,14 +943,22 @@ export default function AdminDashboard() {
                           <td className="px-6 py-4 text-center text-sm font-bold text-gray-700">
                             {linkedCount[u.id] || 0}
                           </td>
-                          <td className="px-6 py-4 text-center">
-                            <button
-                              onClick={() => handleDelete(u)}
-                              disabled={busyId === u.id}
-                              className="bg-red-50 text-red-600 px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50"
-                            >
-                              Hapus
-                            </button>
+                          <td className="px-6 py-4">
+                            <div className="flex justify-center gap-2">
+                              <button
+                                onClick={() => openEarnings(u)}
+                                className="whitespace-nowrap text-blue-600 bg-blue-50 px-4 py-1.5 rounded-lg text-sm font-bold"
+                              >
+                                Pendapatan & Payout
+                              </button>
+                              <button
+                                onClick={() => handleDelete(u)}
+                                disabled={busyId === u.id}
+                                className="bg-red-50 text-red-600 px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50"
+                              >
+                                Hapus
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -778,7 +977,8 @@ export default function AdminDashboard() {
               <h2 className="text-2xl font-bold text-gray-800 mb-2">Konten</h2>
               <p className="text-sm text-gray-500 font-medium">
                 Data konten disinkronkan otomatis dari Pathway setiap hari.
-                {lastSynced && ` Terakhir sinkron: ${formatDateTime(lastSynced)}.`}
+                {lastSynced && ` Terakhir sinkron: ${formatDateTime(lastSynced)}.`} Gross & Net
+                dihitung sejak rilis; Net = 80% gross dikurangi fee PayPal.
               </p>
             </div>
             <div className="bg-white rounded-3xl border border-gray-100 overflow-x-auto shadow-sm">
@@ -796,6 +996,12 @@ export default function AdminDashboard() {
                     <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase text-right">
                       Total Unit
                     </th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Gross
+                    </th>
+                    <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Net
+                    </th>
                     <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase">Kreator</th>
                     <th className="px-4 py-4 text-xs font-bold text-gray-500 uppercase text-center">
                       Aksi
@@ -805,7 +1011,7 @@ export default function AdminDashboard() {
                 <tbody>
                   {contentsList.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="text-center py-8 text-gray-400 font-bold">
+                      <td colSpan={11} className="text-center py-8 text-gray-400 font-bold">
                         Belum ada konten dari Pathway.
                       </td>
                     </tr>
@@ -830,6 +1036,12 @@ export default function AdminDashboard() {
                         </td>
                         <td className="px-4 py-4 text-sm font-bold text-gray-800 text-right">
                           {c.units_total.toLocaleString("id-ID")}
+                        </td>
+                        <td className="px-4 py-4 text-sm text-gray-700 text-right whitespace-nowrap">
+                          {formatUsd(c.gross_usd)}
+                        </td>
+                        <td className="px-4 py-4 text-sm font-bold text-gray-800 text-right whitespace-nowrap">
+                          {formatUsd(c.net_usd)}
                         </td>
                         <td className="px-4 py-4">
                           {c.splits.length === 0 ? (
@@ -864,16 +1076,18 @@ export default function AdminDashboard() {
           </div>
         )}
 
-        {/* TAB LAPORAN (DIGROUPING 1 BARIS PER BULAN) */}
+        {/* TAB LAPORAN (PER BULAN, RINCIAN PER KONTEN) */}
         {activeTab === "laporan" && (
-          <div className="max-w-6xl space-y-6">
-            <div className="flex justify-between items-end mb-4">
+          <div className="max-w-7xl space-y-6">
+            <div className="flex flex-wrap justify-between items-end gap-4 mb-4">
               <div>
                 <h2 className="text-2xl font-bold text-gray-800 mb-2">
                   Rekapitulasi Penjualan Bulanan
                 </h2>
                 <p className="text-sm text-gray-500 font-medium">
-                  Data terkelompokkan per bulan. Silakan filter bulan yang ingin dilihat.
+                  Net = 80% gross dari Pathway dikurangi fee PayPal{" "}
+                  {report ? `${report.paypal_fee_pct}%` : "-"}. Bagian kreator = net × split;
+                  sisanya bagian Squareclouds.
                 </p>
               </div>
               <select
@@ -882,87 +1096,422 @@ export default function AdminDashboard() {
                 className="bg-white border border-gray-200 text-gray-800 rounded-lg p-2 px-4 font-bold shadow-sm outline-none cursor-pointer"
               >
                 <option value="">-- Semua Bulan --</option>
-                {availableMonths.map((m: any) => (
+                {availableMonths.map((m) => (
                   <option key={m} value={m}>
-                    {m}
+                    {formatMonth(m)}
                   </option>
                 ))}
               </select>
             </div>
 
-            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-x-auto">
               <table className="w-full text-left">
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Bulan</th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
-                      Rincian Konten & Qty
+                      Bulan / Konten
                     </th>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
-                      Total Gross ($)
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Unit
                     </th>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
-                      Squareclouds (20%)
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Gross
                     </th>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
-                      Rincian Kreator
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Net
+                    </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Bagian Kreator
+                    </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-right">
+                      Squareclouds
                     </th>
                   </tr>
                 </thead>
-                <tbody>
-                  {groupedReportsList.length === 0 ? (
+                {shownMonths.length === 0 ? (
+                  <tbody>
                     <tr>
-                      <td colSpan={5} className="text-center py-8 text-gray-400 font-bold">
+                      <td colSpan={6} className="text-center py-8 text-gray-400 font-bold">
                         Tidak ada data untuk bulan ini.
                       </td>
                     </tr>
-                  ) : (
-                    groupedReportsList.map((row: any, i: number) => (
-                      <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/50 align-top">
-                        <td className="px-6 py-4 font-bold text-gray-900 text-base">{row.bulan}</td>
-                        <td className="px-6 py-4 space-y-2">
-                          {row.items.map((item: any, idx: number) => (
-                            <div key={idx} className="border-b border-gray-100 pb-1 last:border-0">
-                              <p className="font-bold text-gray-800 text-sm">{item.nama_konten}</p>
-                              <p className="text-xs text-gray-500 font-medium">
-                                {item.total_qty} copy terjual
-                              </p>
-                            </div>
-                          ))}
+                  </tbody>
+                ) : (
+                  shownMonths.map((m) => (
+                    <tbody key={m.month} className="border-b border-gray-100">
+                      <tr className="bg-blue-50/40">
+                        <td className="px-6 py-3 font-black text-gray-900">
+                          {formatMonth(m.month)}
                         </td>
-                        <td className="px-6 py-4 text-sm font-bold text-gray-800">
-                          ${row.totalGross.toFixed(2)}
-                        </td>
-                        <td className="px-6 py-4 text-sm font-black text-blue-600">
-                          ${row.totalSqRevenue.toFixed(2)}
-                        </td>
-                        <td className="px-6 py-4 text-sm space-y-1">
-                          {Object.keys(row.creatorBreakdownsMap).length === 0 ? (
-                            <div className="text-xs bg-gray-100 p-2 rounded-lg text-gray-600 font-bold">
-                              Tidak ada kreator (100% SC)
-                            </div>
-                          ) : (
-                            Object.entries(row.creatorBreakdownsMap).map(
-                              ([cLabel, cVal]: [string, any], idx: number) => (
-                                <div
-                                  key={idx}
-                                  className="text-xs bg-green-50 p-2 rounded-lg text-green-700 font-bold"
-                                >
-                                  {cLabel}: ${cVal.toFixed(2)}
-                                </div>
-                              )
-                            )
-                          )}
-                        </td>
+                        <MoneyCells totals={m} strong />
                       </tr>
-                    ))
-                  )}
-                </tbody>
+                      {m.by_content.map((c) => (
+                        <tr key={c.content_id} className="border-t border-gray-50 align-top">
+                          <td className="py-3 pl-10 pr-6">
+                            <p className="text-sm font-bold text-gray-800">{c.name}</p>
+                            {c.creators.length === 0 ? (
+                              <p className="text-xs font-bold text-gray-400">
+                                Tidak ada kreator (100% SC)
+                              </p>
+                            ) : (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {c.creators.map((cr) => (
+                                  <span
+                                    key={cr.user_id}
+                                    className="whitespace-nowrap text-xs bg-green-50 px-2 py-0.5 rounded-lg text-green-700 font-bold"
+                                  >
+                                    {cr.name} ({cr.split_pct}%): {formatUsd(cr.share_usd)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <MoneyCells totals={c} />
+                        </tr>
+                      ))}
+                    </tbody>
+                  ))
+                )}
+                {shownTotals && (
+                  <tfoot className="bg-gray-50 border-t-2 border-gray-200">
+                    <tr>
+                      <td className="px-6 py-4 text-sm font-black uppercase text-gray-900">
+                        Total {filterBulan ? formatMonth(filterBulan) : "semua bulan"}
+                      </td>
+                      <MoneyCells totals={shownTotals} strong />
+                    </tr>
+                  </tfoot>
+                )}
               </table>
             </div>
           </div>
         )}
+
+        {/* TAB PENGATURAN */}
+        {activeTab === "pengaturan" && (
+          <div className="max-w-2xl space-y-6">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800 mb-2">Pengaturan</h2>
+              <p className="text-sm text-gray-500 font-medium">
+                Berlaku langsung untuk semua perhitungan pendapatan kreator dan laporan.
+              </p>
+            </div>
+            <form
+              onSubmit={handleSaveSettings}
+              className="bg-white rounded-3xl border border-gray-100 shadow-sm p-6 space-y-5"
+            >
+              <label className="block">
+                <span className="text-sm font-bold text-gray-800">Fee PayPal (%)</span>
+                <input
+                  type="number"
+                  required
+                  min="0"
+                  max="100"
+                  step="any"
+                  value={settingsForm.paypal_fee_pct}
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, paypal_fee_pct: e.target.value }))}
+                  className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  Dipotong saat Pathway membayar Squareclouds: net = 80% gross × (1 − fee).
+                </span>
+              </label>
+              <label className="block">
+                <span className="text-sm font-bold text-gray-800">Kurs IDR (Rp per $1)</span>
+                <input
+                  type="number"
+                  required
+                  min="0"
+                  step="any"
+                  value={settingsForm.idr_rate}
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, idr_rate: e.target.value }))}
+                  className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  Untuk payout bank/e-wallet. Kurs ikut disimpan di tiap payout saat dicatat, jadi
+                  payout lama tidak berubah.
+                </span>
+              </label>
+              <button
+                type="submit"
+                disabled={savingSettings}
+                className="bg-blue-600 text-white px-6 py-2.5 rounded-xl text-sm font-bold hover:bg-blue-700 transition disabled:opacity-50"
+              >
+                {savingSettings ? "Menyimpan..." : "Simpan"}
+              </button>
+            </form>
+          </div>
+        )}
       </div>
+
+      {/* MODAL PENDAPATAN & PAYOUT */}
+      {earningsPanel && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white p-6 md:p-8 rounded-3xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-start gap-4 mb-6">
+              <div>
+                <h3 className="text-xl font-bold">Pendapatan & Payout</h3>
+                <p className="text-sm text-gray-500">
+                  {earningsPanel.user.name} · {earningsPanel.user.email}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEarningsPanel(null)}
+                className="px-4 py-2 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200 transition"
+              >
+                Tutup
+              </button>
+            </div>
+
+            {earningsPanel.error ? (
+              <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">
+                {earningsPanel.error}
+              </div>
+            ) : !earningsData ? (
+              <p className="text-sm font-bold text-blue-600">Memuat...</p>
+            ) : (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {(
+                    [
+                      ["Total diperoleh", earningsData.total_earned_usd, earningsData.total_earned_idr],
+                      ["Sudah dibayar", earningsData.total_paid_usd, earningsData.total_paid_idr],
+                      ["Saldo tertunda", earningsData.outstanding_usd, earningsData.outstanding_idr],
+                    ] as const
+                  ).map(([label, usd, idr]) => (
+                    <div key={label} className="rounded-2xl bg-gray-50 p-4">
+                      <p className="text-xs font-bold uppercase text-gray-400">{label}</p>
+                      <p className="text-2xl font-black text-gray-900">{formatUsd(usd)}</p>
+                      {idr !== null && (
+                        <p className="text-xs font-bold text-gray-500">≈ {formatIdr(idr)}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {!earningsData.payout_method && (
+                  <div className="rounded-xl bg-amber-50 p-3 text-sm font-bold text-amber-700">
+                    Kreator ini belum mengisi metode payout, jadi pembayaran belum bisa dicatat.
+                    Minta kreator mengisinya di dashboard mereka.
+                  </div>
+                )}
+                {earningsPanel.user.account_status !== "Active" && (
+                  <div className="rounded-xl bg-amber-50 p-3 text-sm font-bold text-amber-700">
+                    Kreator nonaktif: pembayaran hanya bisa dicatat untuk kreator berstatus Active.
+                  </div>
+                )}
+
+                {earningsData.payout_method && (
+                  <div className="rounded-2xl border border-gray-100 p-4">
+                    <h4 className="text-sm font-bold text-gray-800 mb-2">Data payout</h4>
+                    <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
+                      <dt className="text-gray-500">Metode</dt>
+                      <dd className="font-bold text-gray-900">
+                        {PAYOUT_METHOD_LABEL[earningsData.payout_method]}
+                      </dd>
+                      {PAYOUT_FIELDS[earningsData.payout_method].map((f) => (
+                        <Fragment key={f}>
+                          <dt className="text-gray-500">{PAYOUT_FIELD_LABEL[f]}</dt>
+                          <dd className="font-mono font-bold text-gray-900 select-all break-all">
+                            {earningsData.payout_details?.[f] || "-"}
+                          </dd>
+                        </Fragment>
+                      ))}
+                    </dl>
+                  </div>
+                )}
+
+                <div>
+                  <h4 className="text-sm font-bold text-gray-800 mb-2">Per konten (sejak rilis)</h4>
+                  <div className="rounded-2xl border border-gray-100 overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Konten</th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                            Unit
+                          </th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                            Gross
+                          </th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                            Net
+                          </th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                            Split
+                          </th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                            Bagian kreator
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {earningsData.by_content.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="px-4 py-4 text-center text-gray-400 font-bold">
+                              Belum tertaut ke konten mana pun.
+                            </td>
+                          </tr>
+                        ) : (
+                          earningsData.by_content.map((c) => (
+                            <tr key={c.content_id} className="border-t border-gray-50">
+                              <td className="px-4 py-2 font-bold text-gray-800">{c.name}</td>
+                              <td className="px-4 py-2 text-right">{c.units.toLocaleString("id-ID")}</td>
+                              <td className="px-4 py-2 text-right">{formatUsd(c.gross_usd)}</td>
+                              <td className="px-4 py-2 text-right">{formatUsd(c.net_usd)}</td>
+                              <td className="px-4 py-2 text-right">{c.split_pct}%</td>
+                              <td className="px-4 py-2 text-right font-black text-green-600">
+                                {formatUsd(c.share_usd)}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <form
+                  onSubmit={handleRecordPayout}
+                  className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4 space-y-3"
+                >
+                  <h4 className="text-sm font-bold text-gray-800">Catat pembayaran</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <label className="block">
+                      <span className="text-xs font-bold text-gray-500 uppercase">Jumlah (USD)</span>
+                      <input
+                        type="number"
+                        required
+                        min="0.01"
+                        max={earningsData.outstanding_usd > 0 ? earningsData.outstanding_usd : undefined}
+                        step="0.01"
+                        disabled={!canRecordPayout}
+                        value={payoutForm.amount}
+                        onChange={(e) => setPayoutForm((f) => ({ ...f, amount: e.target.value }))}
+                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-bold text-gray-500 uppercase">Tanggal bayar</span>
+                      <input
+                        type="date"
+                        required
+                        disabled={!canRecordPayout}
+                        value={payoutForm.paid_at}
+                        onChange={(e) => setPayoutForm((f) => ({ ...f, paid_at: e.target.value }))}
+                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="text-xs font-bold text-gray-500 uppercase">Catatan</span>
+                      <input
+                        type="text"
+                        disabled={!canRecordPayout}
+                        value={payoutForm.note}
+                        onChange={(e) => setPayoutForm((f) => ({ ...f, note: e.target.value }))}
+                        placeholder="Opsional, terlihat oleh kreator"
+                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
+                      />
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500">
+                    Default jumlah = saldo tertunda. Payout bank/e-wallet dicatat juga dalam rupiah
+                    dengan kurs {formatIdr(earningsData.idr_rate)}/$.
+                  </p>
+                  {payoutPesan.text && (
+                    <div
+                      className={`rounded-xl p-3 text-sm font-bold ${PESAN_CLASS[payoutPesan.type] || PESAN_CLASS.success}`}
+                    >
+                      {payoutPesan.text}
+                    </div>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={!canRecordPayout || savingPayout}
+                    className="bg-blue-600 text-white px-5 py-2 rounded-xl text-sm font-bold hover:bg-blue-700 transition disabled:opacity-50"
+                  >
+                    {savingPayout ? "Menyimpan..." : "Catat pembayaran"}
+                  </button>
+                </form>
+
+                <div>
+                  <h4 className="text-sm font-bold text-gray-800 mb-2">Riwayat payout</h4>
+                  <div className="rounded-2xl border border-gray-100 overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tanggal</th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                            Jumlah
+                          </th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                            Rupiah
+                          </th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tujuan</th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Catatan</th>
+                          <th className="px-4 py-2" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {earningsData.payouts.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="px-4 py-4 text-center text-gray-400 font-bold">
+                              Belum ada payout.
+                            </td>
+                          </tr>
+                        ) : (
+                          earningsData.payouts.map((p) => (
+                            <tr key={p.id} className="border-t border-gray-50 align-top">
+                              <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
+                              <td className="px-4 py-2 text-right font-black text-gray-900">
+                                {formatUsd(p.amount_usd)}
+                              </td>
+                              <td className="px-4 py-2 text-right whitespace-nowrap">
+                                {p.amount_idr !== null ? (
+                                  <>
+                                    {formatIdr(p.amount_idr)}
+                                    {p.idr_rate !== null && (
+                                      <span className="block text-xs text-gray-400">
+                                        kurs {formatIdr(p.idr_rate)}/$
+                                      </span>
+                                    )}
+                                  </>
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                              <td className="px-4 py-2">
+                                <span className="font-bold">
+                                  {PAYOUT_METHOD_LABEL[p.method] || p.method}
+                                </span>
+                                <span className="block text-xs text-gray-500 break-all">
+                                  {payoutDetailsText(p.method, p.details)}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
+                              <td className="px-4 py-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeletePayout(p)}
+                                  disabled={deletingPayoutId !== null}
+                                  className="bg-red-50 text-red-600 px-3 py-1 rounded-lg text-xs font-bold disabled:opacity-50"
+                                >
+                                  {deletingPayoutId === p.id ? "Menghapus..." : "Hapus"}
+                                </button>
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* MODAL ATUR SPLIT */}
       {splitEditor && (
