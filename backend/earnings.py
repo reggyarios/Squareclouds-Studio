@@ -1,0 +1,346 @@
+"""Rumus uang portal kreator. Satu-satunya tempat perhitungan pendapatan;
+endpoint kreator dan admin sama-sama memakai modul ini.
+
+Rantai uang (docs/payout-v2.2.md §0):
+
+    gross          = harga × unit                      (Pathway: field `gross` per hari)
+    net80          = gross × 80%                       (Pathway: field `creator` per hari)
+    net            = net80 × (1 − paypal_fee_pct/100)  (fee PayPal saat Pathway membayar)
+    bagian_kreator = net × split_pct/100               (split per konten)
+    bagian_sq      = net − Σ bagian_kreator
+    IDR            = USD × idr_rate                    (hanya payout non-PayPal)
+
+Angka dihitung tanpa pembulatan; pembulatan ke 2 desimal hanya di output (`money`).
+"""
+import json
+from datetime import datetime, timezone
+
+from sqlalchemy import and_, case, func, literal_column, or_
+from sqlalchemy.orm import Session
+
+import models
+
+# Bagian gross yang dibayar Pathway ke Squareclouds. Hanya untuk baris
+# daily_sales lama yang belum punya gross_usd/net80_usd dari Pathway.
+PATHWAY_NET_SHARE = 0.8
+
+# Metode payout yang dibayar dalam rupiah (dikonversi dengan idr_rate).
+IDR_METHODS = ("bank", "ewallet")
+
+
+def money(value: float) -> float:
+    """Bulatkan ke 2 desimal untuk output (+0.0 mengubah -0.0 jadi 0.0)."""
+    return round(value, 2) + 0.0
+
+
+def net_from_net80(net80: float, fee_pct: float) -> float:
+    return net80 * (1 - fee_pct / 100)
+
+
+def creator_share(net: float, split_pct: float) -> float:
+    return net * split_pct / 100
+
+
+def to_idr(usd: float, rate: float) -> float:
+    return usd * rate
+
+
+# ============================================================================
+# SETTINGS
+# ============================================================================
+
+def get_setting_float(db: Session, key: str, default) -> float:
+    row = db.get(models.Setting, key)
+    try:
+        return float(row.value) if row is not None else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def set_setting(db: Session, key: str, value) -> None:
+    """Simpan nilai setting tanpa commit; pemanggil yang commit."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    row = db.get(models.Setting, key)
+    if row is None:
+        db.add(models.Setting(key=key, value=str(value), updated_at=now))
+    else:
+        row.value = str(value)
+        row.updated_at = now
+
+
+def paypal_fee_pct(db: Session) -> float:
+    return get_setting_float(db, "paypal_fee_pct", models.SETTING_DEFAULTS["paypal_fee_pct"])
+
+
+def idr_rate(db: Session) -> float:
+    return get_setting_float(db, "idr_rate", models.SETTING_DEFAULTS["idr_rate"])
+
+
+# ============================================================================
+# PENJUALAN PER KONTEN
+# ============================================================================
+
+def content_rows(db: Session, user_id: int | None = None, month: str | None = None) -> list[dict]:
+    """Penjualan per (konten, bulan): units, gross_usd, net80_usd, net_usd.
+
+    user_id: hanya konten yang tertaut ke kreator itu. month (YYYY-MM): hanya
+    bulan itu. Baris yang gross_usd dan net80_usd-nya masih 0 (belum disinkron
+    ulang sejak kolom itu ada) memakai fallback harga konten × unit.
+    """
+    sale = models.DailySales
+    # literal_column supaya substr di SELECT dan GROUP BY identik; PostgreSQL
+    # menolak kalau argumennya jadi bind parameter yang berbeda.
+    month_col = func.substr(sale.date, literal_column("1"), literal_column("7"))
+    from_pathway = or_(sale.gross_usd != 0, sale.net80_usd != 0)
+    fallback_gross = sale.quantity * models.Content.price
+
+    query = (
+        db.query(
+            sale.content_id,
+            month_col.label("month"),
+            func.sum(sale.quantity),
+            func.sum(case((from_pathway, sale.gross_usd), else_=fallback_gross)),
+            func.sum(case((from_pathway, sale.net80_usd), else_=fallback_gross * PATHWAY_NET_SHARE)),
+        )
+        .join(models.Content, models.Content.id == sale.content_id)
+        .group_by(sale.content_id, month_col)
+    )
+    if user_id is not None:
+        query = query.join(
+            models.CreatorSplit,
+            and_(
+                models.CreatorSplit.content_id == sale.content_id,
+                models.CreatorSplit.user_id == user_id,
+            ),
+        )
+    if month:
+        query = query.filter(month_col == month)
+
+    fee = paypal_fee_pct(db)
+    return [
+        {
+            "content_id": content_id,
+            "month": row_month,
+            "units": int(units or 0),
+            "gross_usd": float(gross or 0),
+            "net80_usd": float(net80 or 0),
+            "net_usd": net_from_net80(float(net80 or 0), fee),
+        }
+        for content_id, row_month, units, gross, net80 in query.all()
+    ]
+
+
+# ============================================================================
+# KREATOR
+# ============================================================================
+
+def load_details(raw: str | None) -> dict | None:
+    """JSON payout_details/details -> dict (None kalau kosong/rusak)."""
+    try:
+        value = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def serialize_payout(payout: models.Payout, include_internal: bool) -> dict:
+    item = {
+        "id": payout.id,
+        "paid_at": payout.paid_at,
+        "amount_usd": money(payout.amount_usd),
+        "idr_rate": payout.idr_rate,
+        "amount_idr": money(payout.amount_idr) if payout.amount_idr is not None else None,
+        "method": payout.method,
+        "note": payout.note,
+    }
+    if include_internal:
+        item.update(
+            details=load_details(payout.details),
+            created_by=payout.created_by,
+            created_at=payout.created_at,
+        )
+    return item
+
+
+def creator_summary(db: Session, user: models.User, include_internal: bool) -> dict:
+    """Pendapatan, pembayaran, dan saldo tertunda satu kreator.
+
+    include_internal=False (respons kreator) hanya berisi unit dan bagian
+    kreator: tidak ada gross, net80, net, split %, maupun bagian Squareclouds.
+    include_internal=True (hanya admin) menambahkan gross_usd, net_usd, dan
+    split_pct.
+    """
+    rate = idr_rate(db)
+    links = (
+        db.query(models.CreatorSplit, models.Content)
+        .join(models.Content, models.Content.id == models.CreatorSplit.content_id)
+        .filter(models.CreatorSplit.user_id == user.id)
+        .order_by(models.Content.name)
+        .all()
+    )
+
+    # Konten tertaut tanpa penjualan tetap ditampilkan (unit 0).
+    contents = {
+        content.id: {
+            "content": content,
+            "split_pct": split.split_percentage,
+            "units": 0, "share": 0.0, "gross": 0.0, "net": 0.0,
+        }
+        for split, content in links
+    }
+    months = {}
+    for row in content_rows(db, user_id=user.id):
+        bucket = contents[row["content_id"]]
+        share = creator_share(row["net_usd"], bucket["split_pct"])
+        month = months.setdefault(row["month"], {"units": 0, "share": 0.0, "gross": 0.0, "net": 0.0})
+        for b in (bucket, month):
+            b["units"] += row["units"]
+            b["share"] += share
+            b["gross"] += row["gross_usd"]
+            b["net"] += row["net_usd"]
+
+    # Field dipilih satu per satu (bukan disaring) supaya field internal tidak
+    # pernah ikut ke respons kreator.
+    by_content = []
+    for content_id, b in contents.items():
+        item = {
+            "content_id": content_id,
+            "name": b["content"].name,
+            "status": b["content"].status,
+            "units": b["units"],
+            "share_usd": money(b["share"]),
+        }
+        if include_internal:
+            item.update(gross_usd=money(b["gross"]), net_usd=money(b["net"]), split_pct=b["split_pct"])
+        by_content.append(item)
+
+    by_month = []
+    for month, b in sorted(months.items(), reverse=True):
+        item = {"month": month, "units": b["units"], "share_usd": money(b["share"])}
+        if include_internal:
+            item.update(gross_usd=money(b["gross"]), net_usd=money(b["net"]))
+        by_month.append(item)
+
+    payouts = (
+        db.query(models.Payout)
+        .filter(models.Payout.user_id == user.id)
+        .order_by(models.Payout.paid_at.desc(), models.Payout.id.desc())
+        .all()
+    )
+    earned = sum(b["share"] for b in contents.values())
+    paid = sum(p.amount_usd for p in payouts)
+    outstanding = earned - paid
+
+    return {
+        "total_earned_usd": money(earned),
+        "total_paid_usd": money(paid),
+        "outstanding_usd": money(outstanding),
+        "idr_rate": rate,
+        "outstanding_idr": (
+            money(to_idr(outstanding, rate)) if user.payout_method in IDR_METHODS else None
+        ),
+        "by_content": by_content,
+        "by_month": by_month,
+        "payouts": [serialize_payout(p, include_internal) for p in payouts],
+    }
+
+
+# ============================================================================
+# ADMIN
+# ============================================================================
+
+MONEY_KEYS = ("gross_usd", "net80_usd", "net_usd", "creators_share_usd", "squareclouds_share_usd")
+
+
+def _empty_totals(**extra) -> dict:
+    return {**extra, "units": 0, **{k: 0.0 for k in MONEY_KEYS}}
+
+
+def _add_totals(bucket: dict, values: dict) -> None:
+    bucket["units"] += values["units"]
+    for k in MONEY_KEYS:
+        bucket[k] += values[k]
+
+
+def _output_totals(bucket: dict) -> dict:
+    return {**bucket, **{k: money(bucket[k]) for k in MONEY_KEYS}}
+
+
+def admin_overview(db: Session, month: str | None = None) -> dict:
+    """Gross, net80, net, Σ bagian kreator, dan bagian Squareclouds: total,
+    per konten (+ rincian kreator), dan per bulan (+ per konten di bulan itu).
+    month (YYYY-MM) membatasi ke satu bulan.
+    """
+    content_info = {
+        c.id: (c.name, c.status)
+        for c in db.query(models.Content.id, models.Content.name, models.Content.status)
+    }
+    splits = {}
+    for content_id, user_id, user_name, pct in (
+        db.query(
+            models.CreatorSplit.content_id,
+            models.CreatorSplit.user_id,
+            models.User.name,
+            models.CreatorSplit.split_percentage,
+        )
+        .join(models.User, models.User.id == models.CreatorSplit.user_id)
+        .order_by(models.User.name)
+    ):
+        splits.setdefault(content_id, []).append((user_id, user_name, pct))
+
+    def content_bucket(buckets: dict, content_id: int) -> dict:
+        if content_id not in buckets:
+            name, status = content_info[content_id]
+            buckets[content_id] = _empty_totals(
+                content_id=content_id, name=name, status=status, creators={}
+            )
+        return buckets[content_id]
+
+    totals = _empty_totals()
+    contents = {}
+    months = {}
+    for row in content_rows(db, month=month):
+        content_id = row["content_id"]
+        shares = [
+            (user_id, user_name, pct, creator_share(row["net_usd"], pct))
+            for user_id, user_name, pct in splits.get(content_id, [])
+        ]
+        creators_total = sum(s[3] for s in shares)
+        values = {
+            "units": row["units"],
+            "gross_usd": row["gross_usd"],
+            "net80_usd": row["net80_usd"],
+            "net_usd": row["net_usd"],
+            "creators_share_usd": creators_total,
+            "squareclouds_share_usd": row["net_usd"] - creators_total,
+        }
+
+        month_bucket = months.setdefault(
+            row["month"], {"totals": _empty_totals(month=row["month"]), "contents": {}}
+        )
+        _add_totals(totals, values)
+        _add_totals(month_bucket["totals"], values)
+        for bucket in (content_bucket(contents, content_id), content_bucket(month_bucket["contents"], content_id)):
+            _add_totals(bucket, values)
+            for user_id, user_name, pct, share in shares:
+                creator = bucket["creators"].setdefault(
+                    user_id, {"user_id": user_id, "name": user_name, "split_pct": pct, "share_usd": 0.0}
+                )
+                creator["share_usd"] += share
+
+    def output_content(bucket: dict) -> dict:
+        creators = [{**c, "share_usd": money(c["share_usd"])} for c in bucket["creators"].values()]
+        return {**_output_totals(bucket), "creators": creators}
+
+    def output_contents(buckets: dict) -> list[dict]:
+        return [output_content(b) for b in sorted(buckets.values(), key=lambda b: b["name"].lower())]
+
+    return {
+        "paypal_fee_pct": paypal_fee_pct(db),
+        "totals": _output_totals(totals),
+        "by_content": output_contents(contents),
+        "by_month": [
+            {**_output_totals(m["totals"]), "by_content": output_contents(m["contents"])}
+            for _, m in sorted(months.items(), reverse=True)
+        ],
+    }
