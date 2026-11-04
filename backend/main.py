@@ -351,9 +351,12 @@ def get_valid_invitation(db: Session, token: str | None) -> models.Invitation:
     return invitation
 
 
+def portal_url() -> str:
+    return (os.getenv("PORTAL_URL", "").strip() or DEFAULT_PORTAL_URL).rstrip("/")
+
+
 def send_invitation_email(email: str, token: str) -> bool:
-    portal_url = (os.getenv("PORTAL_URL", "").strip() or DEFAULT_PORTAL_URL).rstrip("/")
-    link = f"{portal_url}/register?token={token}"
+    link = f"{portal_url()}/register?token={token}"
     text = (
         "Halo,\n\n"
         "Anda diundang bergabung ke Creator Portal Squareclouds Studio. "
@@ -889,6 +892,109 @@ def get_user_earnings(
     }
 
 
+MONTHS_ID = (
+    "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
+    "Agustus", "September", "Oktober", "November", "Desember",
+)
+
+
+def format_date_id(value: str) -> str:
+    """YYYY-MM-DD -> "4 November 2026"."""
+    try:
+        d = date.fromisoformat(value)
+    except ValueError:
+        return value
+    return f"{d.day} {MONTHS_ID[d.month - 1]} {d.year}"
+
+
+def format_rupiah(value: float) -> str:
+    """16500 -> "Rp16.500"; pecahan tetap terlihat (16250.5 -> "Rp16.250,5")."""
+    text = f"{value:,.2f}".rstrip("0").rstrip(".")
+    return "Rp" + text.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def payout_destination_text(method: str, details: dict | None) -> str:
+    """Tujuan payout termask, mis. "Transfer bank BCA ****1234"."""
+    details = details or {}
+    if method == "paypal":
+        return f"PayPal {mask_email(str(details.get('paypal_email') or ''))}".strip()
+    if method == "bank":
+        number = str(details.get("account_number") or "")
+        return f"Transfer bank {details.get('bank_name') or ''} ****{number[-4:]}"
+    if method == "ewallet":
+        phone = str(details.get("phone") or "")
+        return f"{details.get('provider') or 'E-wallet'} ****{phone[-4:]}"
+    return method
+
+
+def send_payout_email(user: models.User, payout: models.Payout) -> bool:
+    amount = f"${payout.amount_usd:,.2f}"
+    # Rupiah dari snapshot payout (dihitung earnings.to_idr saat dicatat).
+    idr = (
+        f"≈ {format_rupiah(payout.amount_idr)} (kurs {format_rupiah(payout.idr_rate)}/$)"
+        if payout.method != "paypal" and payout.amount_idr is not None and payout.idr_rate
+        else None
+    )
+    destination = payout_destination_text(payout.method, earnings.load_details(payout.details))
+    paid_on = format_date_id(payout.paid_at)
+    link = f"{portal_url()}/creator"
+
+    rows = [("Jumlah", amount + (f"\n{idr}" if idr else "")), ("Tujuan", destination), ("Tanggal", paid_on)]
+    if payout.note:
+        rows.append(("Catatan", payout.note))
+
+    text = (
+        f"Halo {user.name},\n\n"
+        "Payout pendapatan Anda dari Squareclouds Studio telah dikirim.\n\n"
+        + "\n".join(f"{label:8}: {value}".replace("\n", "\n" + " " * 10) for label, value in rows)
+        + "\n\nLihat rincian pendapatan dan riwayat payout di dashboard:\n"
+        f"{link}\n\n"
+        "Salam,\nSquareclouds Studio"
+    )
+    html_rows = "".join(
+        f'<tr><td style="padding:4px 16px 4px 0;color:#6b7280;vertical-align:top">{label}</td>'
+        f'<td style="padding:4px 0;font-weight:bold">{escape(value).replace(chr(10), "<br>")}</td></tr>'
+        for label, value in rows
+    )
+    html = f"""\
+<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937;line-height:1.6">
+  <p>Halo {escape(user.name)},</p>
+  <p>Payout pendapatan Anda dari <b>Squareclouds Studio</b> telah dikirim.</p>
+  <table style="border-collapse:collapse;margin:8px 0 16px">{html_rows}</table>
+  <p><a href="{escape(link)}" style="display:inline-block;padding:10px 20px;border-radius:8px;
+     background:#2563eb;color:#ffffff;text-decoration:none;font-weight:bold">Buka dashboard</a></p>
+  <p style="font-size:12px;color:#6b7280">Atau buka link ini: {escape(link)}</p>
+  <p>Salam,<br>Squareclouds Studio</p>
+</div>"""
+    return mailer.send_mail(
+        user.email, f"Payout Squareclouds Studio: {amount} telah dikirim", html, text
+    )
+
+
+def notify_payout(db: Session, payout: models.Payout) -> bool:
+    """Kirim email payout ke kreator; notified_at diisi kalau terkirim.
+
+    Gagal kirim (error SMTP, atau SMTP belum dikonfigurasi) hanya dicatat ke
+    log: payout yang sudah tersimpan tidak pernah dibatalkan karena email.
+    """
+    user = db.get(models.User, payout.user_id)
+    try:
+        sent = send_payout_email(user, payout)
+    except Exception as e:
+        print(f"Payout Mail Error (payout {payout.id}): {e}", flush=True)
+        return False
+    if not sent:
+        return False
+    try:
+        payout.notified_at = iso_utc(datetime.now(timezone.utc))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Payout notified_at Error (payout {payout.id}): {e}", flush=True)
+        return False
+    return True
+
+
 @app.post("/payouts", status_code=status.HTTP_201_CREATED)
 def create_payout(
     payload: schemas.PayoutCreate,
@@ -948,8 +1054,43 @@ def create_payout(
     db.add(payout)
     db.commit()
     db.refresh(payout)
+
+    # Setelah commit, supaya email yang gagal tidak membatalkan payout.
+    notified = notify_payout(db, payout)
+    db.refresh(payout)
+    message = f"Payout ${amount:,.2f} untuk {user.name} dicatat."
     return {
-        "message": f"Payout ${amount:,.2f} untuk {user.name} dicatat.",
+        "message": message
+        + (
+            " Email notifikasi terkirim."
+            if notified
+            else " Email notifikasi gagal dikirim; kirim ulang dari riwayat payout."
+        ),
+        "notified": notified,
+        "data": earnings.serialize_payout(payout, include_internal=True),
+    }
+
+
+@app.post("/payouts/{payout_id}/notify")
+def resend_payout_email(
+    payout_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    payout = db.query(models.Payout).filter(models.Payout.id == payout_id).first()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout tidak ditemukan")
+    if payout.notified_at:
+        raise HTTPException(status_code=400, detail="Email untuk payout ini sudah terkirim.")
+    if not notify_payout(db, payout):
+        raise HTTPException(
+            status_code=502,
+            detail="Email gagal dikirim. Cek konfigurasi SMTP lalu coba lagi.",
+        )
+    db.refresh(payout)
+    return {
+        "message": "Email payout terkirim.",
         "data": earnings.serialize_payout(payout, include_internal=True),
     }
 

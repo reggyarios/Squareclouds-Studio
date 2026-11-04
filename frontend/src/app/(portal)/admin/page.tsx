@@ -69,6 +69,8 @@ type Payout = {
   // Snapshot data payout saat dibayar.
   details: Record<string, string> | null;
   created_at: string;
+  // Waktu email notifikasi terkirim; null = gagal / belum terkirim.
+  notified_at: string | null;
 };
 
 // Respons /users/{id}/earnings (creator_summary versi admin).
@@ -212,6 +214,7 @@ export default function AdminDashboard() {
   const [payoutForm, setPayoutForm] = useState<PayoutForm>({ amount: "", note: "", paid_at: "" });
   const [savingPayout, setSavingPayout] = useState(false);
   const [deletingPayoutId, setDeletingPayoutId] = useState<number | null>(null);
+  const [notifyingPayoutId, setNotifyingPayoutId] = useState<number | null>(null);
   const [payoutPesan, setPayoutPesan] = useState({ type: "", text: "" });
 
   const [pesan, setPesan] = useState({ type: "", text: "" });
@@ -477,12 +480,29 @@ export default function AdminDashboard() {
           paid_at: payoutForm.paid_at || null,
         }),
       });
-      setPayoutPesan({ type: "success", text: data.message });
+      // Payout tetap tercatat walau email notifikasinya gagal.
+      setPayoutPesan({ type: data.notified ? "success" : "warning", text: data.message });
       await loadEarnings(user);
     } catch (err) {
       setPayoutPesan({ type: "error", text: errMsg(err) });
     } finally {
       setSavingPayout(false);
+    }
+  };
+
+  const handleResendPayoutEmail = async (p: Payout) => {
+    if (!earningsPanel) return;
+    const { user } = earningsPanel;
+    setNotifyingPayoutId(p.id);
+    setPayoutPesan({ type: "", text: "" });
+    try {
+      const data = await api(`/payouts/${p.id}/notify`, { method: "POST" });
+      setPayoutPesan({ type: "success", text: data.message });
+      await loadEarnings(user);
+    } catch (err) {
+      setPayoutPesan({ type: "error", text: errMsg(err) });
+    } finally {
+      setNotifyingPayoutId(null);
     }
   };
 
@@ -1450,13 +1470,14 @@ export default function AdminDashboard() {
                           </th>
                           <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tujuan</th>
                           <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Catatan</th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Email</th>
                           <th className="px-4 py-2" />
                         </tr>
                       </thead>
                       <tbody>
                         {earningsData.payouts.length === 0 ? (
                           <tr>
-                            <td colSpan={6} className="px-4 py-4 text-center text-gray-400 font-bold">
+                            <td colSpan={7} className="px-4 py-4 text-center text-gray-400 font-bold">
                               Belum ada payout.
                             </td>
                           </tr>
@@ -1490,6 +1511,30 @@ export default function AdminDashboard() {
                                 </span>
                               </td>
                               <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
+                              <td className="px-4 py-2">
+                                {p.notified_at ? (
+                                  <span
+                                    title={`Terkirim ${formatDateTime(p.notified_at)}`}
+                                    className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700"
+                                  >
+                                    ✓ Email terkirim
+                                  </span>
+                                ) : (
+                                  <div className="flex flex-col items-start gap-1">
+                                    <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
+                                      ✕ Email gagal
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleResendPayoutEmail(p)}
+                                      disabled={notifyingPayoutId !== null}
+                                      className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
+                                    >
+                                      {notifyingPayoutId === p.id ? "Mengirim..." : "Kirim ulang email"}
+                                    </button>
+                                  </div>
+                                )}
+                              </td>
                               <td className="px-4 py-2 text-right">
                                 <button
                                   type="button"

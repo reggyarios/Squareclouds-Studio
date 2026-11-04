@@ -13,11 +13,13 @@ Checklist §6 spek:
   test_fee_setting_changes_summary
 """
 import json
+import smtplib
 
 import pytest
 
 import auth
 import earnings
+import mailer
 import models
 from database import SessionLocal
 
@@ -553,3 +555,114 @@ def test_settings_reject_non_numeric(client, admin_headers):
     body = {"paypal_fee_pct": "lima", "idr_rate": 16500}
     assert client.put("/settings", json=body, headers=admin_headers).status_code == 422
     assert client.get("/settings", headers=admin_headers).json()["paypal_fee_pct"] == 5.0
+
+
+# ============================================================================
+# EMAIL NOTIFIKASI PAYOUT
+# ============================================================================
+
+def get_payout(payout_id):
+    with SessionLocal() as db:
+        return db.get(models.Payout, payout_id)
+
+
+def failing_send_mail(to, subject, html, text):
+    raise smtplib.SMTPServerDisconnected("SMTP mati")
+
+
+def test_payout_sends_email_to_creator(client, admin_headers, outbox, monkeypatch):
+    monkeypatch.setenv("PORTAL_URL", "https://portal.test/")
+    creator_id = seed_creator(method="bank", details=BANK)
+    body = {"user_id": creator_id, "amount_usd": 10, "note": "Payout <Oktober>", "paid_at": "2026-11-03"}
+    res = client.post("/payouts", json=body, headers=admin_headers)
+    assert res.status_code == 201, res.text
+    assert res.json()["notified"] is True
+    assert get_payout(res.json()["data"]["id"]).notified_at is not None
+
+    [mail] = outbox
+    assert mail["to"] == "creator@example.com"
+    assert mail["subject"] == "Payout Squareclouds Studio: $10.00 telah dikirim"
+    for part in (
+        "Halo Kreator,",
+        "$10.00",
+        "≈ Rp165.000 (kurs Rp16.500/$)",
+        "Transfer bank BCA ****7890",
+        "3 November 2026",
+        "Payout <Oktober>",
+        "https://portal.test/creator",
+    ):
+        assert part in mail["text"], part
+    assert "Payout &lt;Oktober&gt;" in mail["html"]
+    assert "https://portal.test/creator" in mail["html"]
+    assert BANK["account_number"] not in mail["text"] + mail["html"]
+
+
+def test_payout_email_for_paypal_and_ewallet(client, admin_headers, outbox):
+    creator_id = seed_creator(method="paypal", details={"paypal_email": "kreator@gmail.com"})
+    res = client.post("/payouts", json={"user_id": creator_id, "amount_usd": 12.5}, headers=admin_headers)
+    assert res.status_code == 201, res.text
+    assert outbox[-1]["subject"] == "Payout Squareclouds Studio: $12.50 telah dikirim"
+    assert "PayPal kr***@gmail.com" in outbox[-1]["text"]
+    assert "Rp" not in outbox[-1]["text"]
+    assert "Catatan" not in outbox[-1]["text"]
+
+    with SessionLocal() as db:
+        creator = db.get(models.User, creator_id)
+        creator.payout_method = "ewallet"
+        creator.payout_details = json.dumps({"provider": "DANA", "phone": "081234565678", "account_name": "K"})
+        db.commit()
+    client.post("/payouts", json={"user_id": creator_id, "amount_usd": 1}, headers=admin_headers)
+    assert "DANA ****5678" in outbox[-1]["text"]
+    assert "≈ Rp16.500 (kurs Rp16.500/$)" in outbox[-1]["text"]
+
+
+def test_payout_saved_when_email_fails(client, admin_headers, monkeypatch):
+    monkeypatch.setattr(mailer, "send_mail", failing_send_mail)
+    creator_id = seed_creator(method="bank", details=BANK)
+    res = client.post("/payouts", json={"user_id": creator_id, "amount_usd": 10}, headers=admin_headers)
+    assert res.status_code == 201, res.text
+    assert res.json()["notified"] is False
+    assert res.json()["data"]["notified_at"] is None
+    assert "gagal dikirim" in res.json()["message"]
+
+    payout = get_payout(res.json()["data"]["id"])
+    assert payout.notified_at is None
+    assert payout.amount_usd == 10.0
+    assert client.get(f"/users/{creator_id}/earnings", headers=admin_headers).json()["total_paid_usd"] == 10.0
+
+
+def test_payout_without_smtp_is_not_marked_notified(client, admin_headers):
+    # SMTP_HOST kosong (conftest): email hanya dicetak ke log, tidak terkirim.
+    creator_id = seed_creator(method="bank", details=BANK)
+    res = client.post("/payouts", json={"user_id": creator_id, "amount_usd": 10}, headers=admin_headers)
+    assert res.status_code == 201
+    assert res.json()["notified"] is False
+    assert get_payout(res.json()["data"]["id"]).notified_at is None
+
+
+def test_resend_payout_email(client, admin_headers, monkeypatch):
+    creator_id = seed_creator(method="bank", details=BANK)
+    monkeypatch.setattr(mailer, "send_mail", failing_send_mail)
+    payout_id = client.post("/payouts", json={"user_id": creator_id, "amount_usd": 10}, headers=admin_headers).json()["data"]["id"]
+    url = f"/payouts/{payout_id}/notify"
+
+    # Admin-only.
+    assert client.post(url).status_code == 401
+    assert client.post(url, headers=login(client)).status_code == 403
+
+    # Masih gagal -> 502, notified_at tetap NULL.
+    res = client.post(url, headers=admin_headers)
+    assert res.status_code == 502
+    assert get_payout(payout_id).notified_at is None
+
+    sent = []
+    monkeypatch.setattr(mailer, "send_mail", lambda to, subject, html, text: sent.append(subject) or True)
+    res = client.post(url, headers=admin_headers)
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["notified_at"] is not None
+    assert sent == ["Payout Squareclouds Studio: $10.00 telah dikirim"]
+
+    # Sudah terkirim -> tidak dikirim dua kali.
+    assert client.post(url, headers=admin_headers).status_code == 400
+    assert client.post("/payouts/999/notify", headers=admin_headers).status_code == 404
+    assert len(sent) == 1

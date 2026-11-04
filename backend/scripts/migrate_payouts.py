@@ -26,7 +26,8 @@ dengan angka Pathway, termasuk 0 yang asli.
 Tabel baru:
     settings    pengaturan admin; di-seed paypal_fee_pct dan idr_rate
                 kalau belum ada (nilai yang sudah ada tidak ditimpa)
-    payouts     riwayat pembayaran ke kreator
+    payouts     riwayat pembayaran ke kreator; kolom notified_at (waktu email
+                notifikasi terkirim) ikut ditambahkan kalau tabelnya sudah ada
 """
 import sys
 from datetime import datetime, timezone
@@ -88,6 +89,10 @@ with engine.begin() as conn:
         tables=[models.Setting.__table__, models.Payout.__table__],
     )
     print("tabel settings, payouts ok")
+    # Setelah create_all: di DB baru tabel payouts baru ada di titik ini (sudah
+    # dengan kolomnya); di DB lama kolom ini ditambahkan ke tabel yang ada.
+    conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "notified_at" VARCHAR'))
+    print(f"{'payouts.notified_at':32} ok")
     for key, value in models.SETTING_DEFAULTS.items():
         inserted = conn.execute(
             text(

@@ -457,6 +457,10 @@ class Payout(Base):
     # ISO timestamp UTC
     created_at = Column(String, nullable=False)
 
+    # ISO timestamp UTC saat email notifikasi payout terkirim (NULL = gagal /
+    # belum terkirim; admin bisa kirim ulang)
+    notified_at = Column(String, nullable=True)
+
 
 # ============================================================
 # CMS — COMMISSION

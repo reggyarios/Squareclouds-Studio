@@ -84,6 +84,8 @@ export default function CreatorDashboard() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [selectedMonth, setSelectedMonth] = useState<string>("");
+  // Payout terbaru kalau tanggal bayarnya dalam 30 hari terakhir (untuk banner).
+  const [recentPayout, setRecentPayout] = useState<Payout | null>(null);
 
   // null = tidak sedang mengubah metode payout.
   const [payoutForm, setPayoutForm] = useState<PayoutForm | null>(null);
@@ -112,6 +114,13 @@ export default function CreatorDashboard() {
         setPayoutPref(pref);
         // by_month urut dari bulan terbaru.
         if (dashboard.by_month.length > 0) setSelectedMonth(dashboard.by_month[0].month);
+        // payouts urut dari tanggal bayar terbaru; batasnya 30 hari sebelum
+        // awal hari ini (zona waktu browser).
+        const latest = dashboard.payouts[0];
+        const cutoff = new Date();
+        cutoff.setHours(0, 0, 0, 0);
+        cutoff.setDate(cutoff.getDate() - 30);
+        if (latest && new Date(`${latest.paid_at}T00:00:00`) >= cutoff) setRecentPayout(latest);
       })
       .catch((err) => setLoadError(errMsg(err)))
       .finally(() => setLoading(false));
@@ -281,6 +290,13 @@ export default function CreatorDashboard() {
       </div>
 
       <div className="max-w-6xl mx-auto px-6 mt-8 space-y-8">
+        {recentPayout && (
+          <div className="rounded-2xl border border-green-100 bg-green-50 px-5 py-3 text-sm font-bold text-green-700">
+            Payout terakhir: {formatUsd(recentPayout.amount_usd)} pada{" "}
+            {formatDate(recentPayout.paid_at)}
+          </div>
+        )}
+
         {/* KARTU RINGKASAN */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           {summaryCards.map((card, idx) => {

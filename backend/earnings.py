@@ -157,6 +157,7 @@ def serialize_payout(payout: models.Payout, include_internal: bool) -> dict:
             details=load_details(payout.details),
             created_by=payout.created_by,
             created_at=payout.created_at,
+            notified_at=payout.notified_at,
         )
     return item
 
