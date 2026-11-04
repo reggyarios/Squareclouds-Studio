@@ -38,7 +38,6 @@ type Content = {
 type SplitRow = { user_id: number; name: string; checked: boolean; percentage: string };
 
 const MAX_CREATOR_SPLIT = 80;
-const MIN_PASSWORD_LENGTH = 8;
 
 const STATUS_BADGE: Record<string, string> = {
   Published: "bg-green-100 text-green-700",
@@ -89,10 +88,6 @@ export default function AdminDashboard() {
   );
   const [savingSplits, setSavingSplits] = useState(false);
   const [splitError, setSplitError] = useState("");
-
-  const [resetUser, setResetUser] = useState<Creator | null>(null);
-  const [newPassword, setNewPassword] = useState("");
-  const [resetError, setResetError] = useState("");
 
   const handleLogout = useCallback(() => {
     localStorage.clear();
@@ -225,33 +220,6 @@ export default function AdminDashboard() {
       () => updateUser(u.id, { account_status: next }),
       next === "Active" ? `${u.name} diaktifkan.` : `${u.name} dinonaktifkan.`
     );
-  };
-
-  const openResetPassword = (u: Creator) => {
-    setResetUser(u);
-    setNewPassword("");
-    setResetError("");
-  };
-
-  const handleResetPassword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!resetUser) return;
-    if (newPassword.length < MIN_PASSWORD_LENGTH) {
-      setResetError(`Password minimal ${MIN_PASSWORD_LENGTH} karakter.`);
-      return;
-    }
-    setBusyId(resetUser.id);
-    setResetError("");
-    try {
-      await updateUser(resetUser.id, { password: newPassword });
-      setPesan({ type: "success", text: `Password ${resetUser.name} berhasil direset.` });
-      setResetUser(null);
-      setNewPassword("");
-    } catch (err) {
-      setResetError(errMsg(err));
-    } finally {
-      setBusyId(null);
-    }
   };
 
   // ==========================================================================
@@ -530,15 +498,12 @@ export default function AdminDashboard() {
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
                       Konten
                     </th>
-                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
-                      Aksi
-                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {creators.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="text-center py-8 text-gray-400 font-bold">
+                      <td colSpan={5} className="text-center py-8 text-gray-400 font-bold">
                         Belum ada kreator yang disetujui.
                       </td>
                     </tr>
@@ -583,14 +548,6 @@ export default function AdminDashboard() {
                           </td>
                           <td className="px-6 py-4 text-center text-sm font-bold text-gray-700">
                             {linkedCount[u.id] || 0}
-                          </td>
-                          <td className="px-6 py-4 text-center">
-                            <button
-                              onClick={() => openResetPassword(u)}
-                              className="text-blue-600 font-bold text-sm bg-blue-50 px-3 py-1 rounded-lg"
-                            >
-                              Reset Password
-                            </button>
                           </td>
                         </tr>
                       );
@@ -882,49 +839,6 @@ export default function AdminDashboard() {
                 Batal
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL RESET PASSWORD */}
-      {resetUser && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white p-8 rounded-3xl max-w-md w-full">
-            <h3 className="text-xl font-bold mb-1">Reset Password</h3>
-            <p className="text-sm text-gray-500 mb-6">
-              {resetUser.name} ({resetUser.email})
-            </p>
-            <form onSubmit={handleResetPassword} className="space-y-4">
-              <div>
-                <label className="block text-sm font-bold mb-1">Password baru</label>
-                <input
-                  type="password"
-                  required
-                  minLength={MIN_PASSWORD_LENGTH}
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  placeholder="Minimal 8 karakter"
-                  className="w-full rounded-xl border px-4 py-2"
-                />
-              </div>
-              {resetError && <p className="text-sm font-bold text-red-600">{resetError}</p>}
-              <div className="flex gap-3 pt-4 border-t mt-6">
-                <button
-                  type="submit"
-                  disabled={busyId === resetUser.id}
-                  className="flex-1 bg-blue-600 text-white py-2.5 rounded-xl font-bold disabled:opacity-50"
-                >
-                  Simpan
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setResetUser(null)}
-                  className="px-4 py-2.5 rounded-xl font-bold bg-gray-100"
-                >
-                  Batal
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}

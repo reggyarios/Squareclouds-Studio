@@ -16,11 +16,11 @@ class UserRegister(BaseModel):
     password: str
     job_title: str
 
+# Sengaja tanpa field password: admin tidak bisa mengubah password siapa pun.
 class UserStatusUpdate(BaseModel):
     name: Optional[str] = None
     job_title: Optional[str] = None
     account_status: Optional[str] = None  # Active | Inactive
-    password: Optional[str] = None
 
 class SplitItem(BaseModel):
     user_id: int

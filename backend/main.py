@@ -617,14 +617,6 @@ def update_user(
             )
         user.account_status = payload.account_status
 
-    if payload.password:
-        if len(payload.password) < MIN_PASSWORD_LENGTH:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Password minimal {MIN_PASSWORD_LENGTH} karakter.",
-            )
-        user.password = auth.get_password_hash(payload.password)
-
     db.commit()
     db.refresh(user)
     return {"message": "Data kreator diperbarui.", "data": serialize_user(user)}
