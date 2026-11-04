@@ -6,7 +6,15 @@ import { apiErrorMessage, apiUrl } from "@/lib/api";
 import { authHeaders, guard } from "@/lib/auth";
 import { JOB_OPTIONS } from "@/lib/portal";
 
-type Tab = "pendaftar" | "kreator" | "konten" | "laporan";
+type Tab = "undangan" | "kreator" | "konten" | "laporan";
+
+type Invitation = {
+  id: number;
+  email: string;
+  created_at: string;
+  expires_at: string;
+  expired: boolean;
+};
 
 type Creator = {
   id: number;
@@ -39,6 +47,12 @@ type SplitRow = { user_id: number; name: string; checked: boolean; percentage: s
 
 const MAX_CREATOR_SPLIT = 80;
 
+const PESAN_CLASS: Record<string, string> = {
+  error: "bg-red-50 text-red-600",
+  warning: "bg-amber-50 text-amber-700",
+  success: "bg-green-50 text-green-700",
+};
+
 const STATUS_BADGE: Record<string, string> = {
   Published: "bg-green-100 text-green-700",
   "Pending Release": "bg-amber-100 text-amber-700",
@@ -70,8 +84,13 @@ const roundPct = (n: number) => Math.round(n * 1e6) / 1e6;
 export default function AdminDashboard() {
   const router = useRouter();
   const [adminName, setAdminName] = useState("");
-  const [activeTab, setActiveTab] = useState<Tab>("pendaftar");
+  const [activeTab, setActiveTab] = useState<Tab>("undangan");
   const [loading, setLoading] = useState(true);
+
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [inviteEmail, setInviteEmail] = useState("");
+  // "new" = form kirim undangan, angka = id undangan yang sedang diproses.
+  const [busyInvite, setBusyInvite] = useState<number | "new" | null>(null);
 
   const [usersList, setUsersList] = useState<Creator[]>([]);
   const [contentsList, setContentsList] = useState<Content[]>([]);
@@ -107,6 +126,11 @@ export default function AdminDashboard() {
     [handleLogout]
   );
 
+  const fetchInvitations = async () => {
+    const data = await api("/invitations");
+    setInvitations(data.data);
+  };
+
   const fetchUsers = async () => {
     const data = await api("/users/");
     setUsersList(data.data);
@@ -141,7 +165,7 @@ export default function AdminDashboard() {
     }
 
     setAdminName(localStorage.getItem("name") || "Admin");
-    Promise.all([fetchUsers(), fetchContents(), fetchReports()])
+    Promise.all([fetchInvitations(), fetchUsers(), fetchContents(), fetchReports()])
       .catch((err) => setPesan({ type: "error", text: errMsg(err) }))
       .finally(() => setLoading(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -153,10 +177,62 @@ export default function AdminDashboard() {
   };
 
   // ==========================================================================
+  // UNDANGAN
+  // ==========================================================================
+
+  // Kirim (atau kirim ulang) undangan. sent=false berarti SMTP belum diisi:
+  // undangan tetap dibuat, link-nya hanya tercetak di log backend.
+  const sendInvite = async (email: string) => {
+    const data = await api("/invitations", { method: "POST", body: JSON.stringify({ email }) });
+    setPesan(
+      data.sent
+        ? { type: "success", text: data.message }
+        : {
+            type: "warning",
+            text: `${data.message} Email belum terkirim (SMTP belum dikonfigurasi).`,
+          }
+    );
+  };
+
+  const runInviteAction = async (busyKey: number | "new", action: () => Promise<void>) => {
+    setBusyInvite(busyKey);
+    setPesan({ type: "", text: "" });
+    try {
+      await action();
+      return true;
+    } catch (err) {
+      setPesan({ type: "error", text: errMsg(err) });
+      return false;
+    } finally {
+      // Juga setelah gagal: undangan bisa sudah tersimpan walau email gagal terkirim.
+      await fetchInvitations().catch(() => {});
+      setBusyInvite(null);
+    }
+  };
+
+  const handleInviteSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (await runInviteAction("new", () => sendInvite(inviteEmail.trim()))) setInviteEmail("");
+  };
+
+  const handleResendInvite = (inv: Invitation) =>
+    runInviteAction(inv.id, () => sendInvite(inv.email));
+
+  const handleCancelInvite = (inv: Invitation) => {
+    if (!confirm(`Batalkan undangan untuk ${inv.email}? Link di email tidak akan bisa dipakai lagi.`))
+      return;
+    runInviteAction(inv.id, async () => {
+      const data = await api(`/invitations/${inv.id}`, { method: "DELETE" });
+      setPesan({ type: "success", text: data.message });
+    });
+  };
+
+  // ==========================================================================
   // KREATOR & PENDAFTAR
   // ==========================================================================
 
   const pendingUsers = usersList.filter((u) => u.account_status === "Pending");
+  const pendingCount = invitations.length + pendingUsers.length;
   const creators = usersList.filter((u) => u.account_status !== "Pending");
   const activeCreators = usersList.filter((u) => u.account_status === "Active");
 
@@ -363,11 +439,11 @@ export default function AdminDashboard() {
           Admin Panel
         </h1>
         <nav className="flex flex-col gap-2 flex-grow">
-          <button onClick={() => switchTab("pendaftar")} className={navClass("pendaftar")}>
-            <span>Pendaftar</span>
-            {pendingUsers.length > 0 && (
+          <button onClick={() => switchTab("undangan")} className={navClass("undangan")}>
+            <span>Undangan & Pendaftar</span>
+            {pendingCount > 0 && (
               <span className="ml-2 rounded-full bg-amber-500 px-2 py-0.5 text-xs font-bold text-white">
-                {pendingUsers.length}
+                {pendingCount}
               </span>
             )}
           </button>
@@ -401,19 +477,111 @@ export default function AdminDashboard() {
       <div className="flex-1 p-6 md:p-10 overflow-y-auto">
         {pesan.text && (
           <div
-            className={`mb-6 p-4 rounded-xl text-sm font-bold ${pesan.type === "error" ? "bg-red-50 text-red-600" : "bg-green-50 text-green-700"}`}
+            className={`mb-6 p-4 rounded-xl text-sm font-bold ${PESAN_CLASS[pesan.type] || PESAN_CLASS.success}`}
           >
             {pesan.text}
           </div>
         )}
 
-        {/* TAB PENDAFTAR */}
-        {activeTab === "pendaftar" && (
+        {/* TAB UNDANGAN & PENDAFTAR */}
+        {activeTab === "undangan" && (
           <div className="max-w-5xl space-y-6">
             <div>
-              <h2 className="text-2xl font-bold text-gray-800 mb-2">Pendaftar Baru</h2>
+              <h2 className="text-2xl font-bold text-gray-800 mb-2">Undangan & Pendaftar</h2>
               <p className="text-sm text-gray-500 font-medium">
-                Kreator yang mendaftar sendiri dan menunggu persetujuan.
+                Kreator hanya bisa mendaftar lewat link undangan yang berlaku 7 hari.
+              </p>
+            </div>
+
+            <form
+              onSubmit={handleInviteSubmit}
+              className="bg-white rounded-3xl border border-gray-100 shadow-sm p-6 flex flex-col sm:flex-row gap-3"
+            >
+              <input
+                type="email"
+                required
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                placeholder="email@kreator.com"
+                className="flex-1 rounded-xl border border-gray-300 px-4 py-2 text-sm focus:border-blue-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={busyInvite !== null}
+                className="bg-blue-600 text-white px-5 py-2 rounded-xl text-sm font-bold hover:bg-blue-700 transition disabled:opacity-50"
+              >
+                {busyInvite === "new" ? "Mengirim..." : "Kirim undangan"}
+              </button>
+            </form>
+
+            <h3 className="text-lg font-bold text-gray-800">Undangan belum dipakai</h3>
+            <div className="bg-white rounded-3xl border border-gray-100 overflow-x-auto shadow-sm">
+              <table className="w-full text-left">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Email</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Dikirim</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
+                      Kedaluwarsa
+                    </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
+                      Aksi
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {invitations.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="text-center py-8 text-gray-400 font-bold">
+                        Tidak ada undangan yang belum dipakai.
+                      </td>
+                    </tr>
+                  ) : (
+                    invitations.map((inv) => (
+                      <tr key={inv.id} className="border-b border-gray-50 hover:bg-gray-50/50">
+                        <td className="px-6 py-4 text-sm font-bold text-gray-900">{inv.email}</td>
+                        <td className="px-6 py-4 text-sm text-gray-700">
+                          {formatDateTime(inv.created_at)}
+                        </td>
+                        <td className="px-6 py-4 text-sm text-gray-700">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {formatDateTime(inv.expires_at)}
+                            {inv.expired && (
+                              <span className="whitespace-nowrap px-2 py-1 rounded text-[10px] font-black uppercase tracking-wider bg-red-100 text-red-600">
+                                Kedaluwarsa
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex justify-center gap-2">
+                            <button
+                              onClick={() => handleResendInvite(inv)}
+                              disabled={busyInvite !== null}
+                              className="whitespace-nowrap text-blue-600 bg-blue-50 px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50"
+                            >
+                              {busyInvite === inv.id ? "Memproses..." : "Kirim ulang"}
+                            </button>
+                            <button
+                              onClick={() => handleCancelInvite(inv)}
+                              disabled={busyInvite !== null}
+                              className="bg-red-50 text-red-600 px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50"
+                            >
+                              Batalkan
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div>
+              <h3 className="text-lg font-bold text-gray-800">Pendaftar menunggu persetujuan</h3>
+              <p className="text-sm text-gray-500 font-medium">
+                Kreator yang sudah mengisi form undangan. Setujui agar bisa login.
               </p>
             </div>
             <div className="bg-white rounded-3xl border border-gray-100 overflow-x-auto shadow-sm">
