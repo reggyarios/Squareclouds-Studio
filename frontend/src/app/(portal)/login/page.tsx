@@ -1,11 +1,8 @@
 "use client";
 
-import { useState, useSyncExternalStore } from "react";
-import Link from "next/link";
+import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiUrl } from "@/lib/api";
-
-const noopSubscribe = () => () => {};
 
 export default function LoginPage() {
   const [email, setEmail] = useState("");
@@ -13,12 +10,6 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const router = useRouter();
-  // Pendaftaran hanya untuk portal kreator, bukan login admin-cms.
-  const showRegisterLink = useSyncExternalStore(
-    noopSubscribe,
-    () => window.location.hostname.toLowerCase() !== "access.squarecloudsmc.com",
-    () => false
-  );
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,7 +65,6 @@ export default function LoginPage() {
       <div className="w-full max-w-md space-y-8 rounded-2xl bg-white p-10 shadow-xl">
         <div className="text-center">
           <h2 className="text-3xl font-extrabold text-gray-900 tracking-tight">Squareclouds</h2>
-          <p className="mt-2 text-sm text-gray-500">Masuk ke portal pendapatan kreator</p>
         </div>
 
         <form className="mt-8 space-y-6" onSubmit={handleLogin}>
@@ -115,15 +105,6 @@ export default function LoginPage() {
             </button>
           </div>
         </form>
-
-        {showRegisterLink && (
-          <p className="text-center text-sm text-gray-500">
-            Belum punya akun?{" "}
-            <Link href="/register" className="font-medium text-blue-600 hover:text-blue-700">
-              Daftar
-            </Link>
-          </p>
-        )}
       </div>
     </div>
   );
