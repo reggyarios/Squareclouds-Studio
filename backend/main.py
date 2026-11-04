@@ -6,9 +6,10 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from jose import JWTError, jwt
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
+import math
 import os
 import re
 import secrets
@@ -21,6 +22,7 @@ from database import create_tables, SessionLocal
 import models
 import schemas
 import auth
+import earnings
 import mailer
 from utils.file_storage import delete_upload, extract_upload_path
 
@@ -660,9 +662,10 @@ def delete_user(
     require_admin(current_user)
     user = get_creator_or_error(db, user_id)
 
-    # FK ke users tidak punya ON DELETE, jadi split dan riwayat pendapatan
-    # dihapus dulu (relationship cascade di models.User juga mencakupnya).
-    for model in (models.CreatorSplit, models.EarningHistory):
+    # FK ke users tidak punya ON DELETE, jadi split, riwayat payout, dan
+    # earning_history lama dihapus dulu (cascade di models.User mencakup split
+    # dan earning_history).
+    for model in (models.CreatorSplit, models.Payout, models.EarningHistory):
         db.query(model).filter(model.user_id == user_id).delete()
     db.delete(user)
     db.commit()
@@ -682,16 +685,14 @@ def serialize_contents(db: Session, content_id: int | None = None) -> list[dict]
     split_query = db.query(models.CreatorSplit, models.User.name).join(
         models.User, models.User.id == models.CreatorSplit.user_id
     )
-    units_query = db.query(
-        models.DailySales.content_id,
-        func.coalesce(func.sum(models.DailySales.quantity), 0),
-    )
     if content_id is not None:
         query = query.filter(models.Content.id == content_id)
         split_query = split_query.filter(models.CreatorSplit.content_id == content_id)
-        units_query = units_query.filter(models.DailySales.content_id == content_id)
 
-    units_by_content = dict(units_query.group_by(models.DailySales.content_id).all())
+    # Unit, gross, dan net all-time per konten (konten tanpa penjualan: 0).
+    totals_by_content = {
+        row["content_id"]: row for row in earnings.admin_overview(db)["by_content"]
+    }
 
     splits_by_content = {}
     for split, user_name in split_query.all():
@@ -717,7 +718,9 @@ def serialize_contents(db: Session, content_id: int | None = None) -> list[dict]
             "pathway_product_id": c.pathway_product_id,
             "pathway_offer_id": c.pathway_offer_id,
             "last_synced_at": c.last_synced_at,
-            "units_total": int(units_by_content.get(c.id, 0) or 0),
+            "units_total": totals_by_content.get(c.id, {}).get("units", 0),
+            "gross_usd": totals_by_content.get(c.id, {}).get("gross_usd", 0.0),
+            "net_usd": totals_by_content.get(c.id, {}).get("net_usd", 0.0),
             "splits": splits_by_content.get(c.id, []),
         }
         for c in query.order_by(models.Content.name).all()
@@ -814,72 +817,275 @@ def replace_content_splits(
 
 @app.get("/admin-reports/")
 def get_admin_reports(
+    month: str | None = None,
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
     require_admin(current_user)
+    # Total, per konten, dan per bulan (opsional satu bulan YYYY-MM).
+    return {"data": earnings.admin_overview(db, month=month)}
 
-    # One query replaces the DailySales -> Content N+1 query pattern.
-    rows = (
-        db.query(models.DailySales, models.Content)
-        .join(models.Content, models.Content.id == models.DailySales.content_id)
-        .all()
+
+# ============================================================================
+# SETTINGS (ADMIN)
+# ============================================================================
+
+def current_settings(db: Session) -> dict:
+    return {
+        "paypal_fee_pct": earnings.paypal_fee_pct(db),
+        "idr_rate": earnings.idr_rate(db),
+    }
+
+
+@app.get("/settings")
+def get_settings(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    return current_settings(db)
+
+
+@app.put("/settings")
+def update_settings(
+    payload: schemas.SettingsUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    fee, rate = payload.paypal_fee_pct, payload.idr_rate
+
+    if not (math.isfinite(fee) and 0 <= fee <= 100):
+        raise HTTPException(status_code=400, detail="Fee PayPal harus antara 0 dan 100%.")
+    if not (math.isfinite(rate) and rate > 0):
+        raise HTTPException(status_code=400, detail="Kurs IDR harus lebih dari 0.")
+
+    earnings.set_setting(db, "paypal_fee_pct", fee)
+    earnings.set_setting(db, "idr_rate", rate)
+    db.commit()
+    return {"message": "Pengaturan disimpan.", "data": current_settings(db)}
+
+
+# ============================================================================
+# PENDAPATAN & PAYOUT KREATOR (ADMIN)
+# ============================================================================
+
+PAYOUT_METHODS = ("paypal", "bank", "ewallet")
+
+
+@app.get("/users/{user_id}/earnings")
+def get_user_earnings(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    user = get_creator_or_error(db, user_id)
+    # Data payout lengkap (tidak dimask): admin perlu untuk membayar.
+    return {
+        **earnings.creator_summary(db, user, include_internal=True),
+        "payout_method": user.payout_method,
+        "payout_details": earnings.load_details(user.payout_details),
+    }
+
+
+@app.post("/payouts", status_code=status.HTTP_201_CREATED)
+def create_payout(
+    payload: schemas.PayoutCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    # Kunci baris kreator (PostgreSQL) supaya dua pencatatan bersamaan tidak
+    # bisa sama-sama lolos cek saldo tertunda.
+    user = (
+        db.query(models.User)
+        .filter(models.User.id == payload.user_id)
+        .with_for_update()
+        .first()
     )
+    if not user or user.role != "Creator":
+        raise HTTPException(status_code=404, detail="Kreator tidak ditemukan")
+    if user.account_status != "Active":
+        raise HTTPException(status_code=400, detail="Payout hanya untuk kreator berstatus Active.")
+    if user.payout_method not in PAYOUT_METHODS:
+        raise HTTPException(status_code=400, detail="Kreator belum mengisi metode payout.")
 
-    grouped = {}
-    for sale, content in rows:
-        month = sale.date[:7]
-        key = (month, content.id)
-        value = grouped.setdefault(
-            key,
-            {
-                "bulan": month,
-                "content_name": content.name,
-                "qty": 0,
-                "gross": 0.0,
-                "content_id": content.id,
-            },
+    if not math.isfinite(payload.amount_usd):
+        raise HTTPException(status_code=400, detail="Jumlah payout tidak valid.")
+    amount = round(payload.amount_usd, 2)
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Jumlah payout harus lebih dari 0.")
+    outstanding = earnings.creator_summary(db, user, include_internal=False)["outstanding_usd"]
+    if amount > outstanding:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Jumlah payout melebihi saldo tertunda (${outstanding:,.2f}).",
         )
-        value["qty"] += sale.quantity
-        value["gross"] += sale.quantity * content.price
 
-    content_ids = {v["content_id"] for v in grouped.values()}
-    split_rows = (
-        db.query(models.CreatorSplit, models.User)
-        .join(models.User, models.User.id == models.CreatorSplit.user_id)
-        .filter(models.CreatorSplit.content_id.in_(content_ids))
-        .all()
-        if content_ids
-        else []
+    paid_at = (payload.paid_at or "").strip()
+    if paid_at:
+        try:
+            paid_at = date.fromisoformat(paid_at).isoformat()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Tanggal bayar harus berformat YYYY-MM-DD.")
+    else:
+        paid_at = datetime.now(timezone.utc).date().isoformat()
+
+    rate = earnings.idr_rate(db)
+    payout = models.Payout(
+        user_id=user.id,
+        amount_usd=amount,
+        idr_rate=rate,
+        amount_idr=earnings.to_idr(amount, rate) if user.payout_method in earnings.IDR_METHODS else None,
+        method=user.payout_method,
+        details=user.payout_details or "{}",
+        note=(payload.note or "").strip() or None,
+        paid_at=paid_at,
+        created_by=current_user.id,
+        created_at=iso_utc(datetime.now(timezone.utc)),
     )
+    db.add(payout)
+    db.commit()
+    db.refresh(payout)
+    return {
+        "message": f"Payout ${amount:,.2f} untuk {user.name} dicatat.",
+        "data": earnings.serialize_payout(payout, include_internal=True),
+    }
 
-    splits_by_content = {}
-    for split, creator in split_rows:
-        splits_by_content.setdefault(split.content_id, []).append(
-            (creator.name, split.split_percentage)
-        )
 
-    result = []
-    for value in grouped.values():
-        gross = value["gross"]
-        result.append(
-            {
-                "bulan": value["bulan"],
-                "nama_konten": value["content_name"],
-                "total_qty": value["qty"],
-                "gross": gross,
-                "sq_revenue": gross * 0.20,
-                "creator_breakdown": [
-                    f"{name} ({percentage}%): "
-                    f"${gross * (percentage / 100):.2f}"
-                    for name, percentage in splits_by_content.get(
-                        value["content_id"], []
-                    )
-                ],
-            }
-        )
+@app.delete("/payouts/{payout_id}")
+def delete_payout(
+    payout_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    payout = db.query(models.Payout).filter(models.Payout.id == payout_id).first()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout tidak ditemukan")
+    db.delete(payout)
+    db.commit()
+    return {"message": "Payout dihapus."}
 
-    return {"data": sorted(result, key=lambda x: x["bulan"], reverse=True)}
+
+# ============================================================================
+# METODE PAYOUT (KREATOR)
+# ============================================================================
+
+# Sama dengan EWALLET_PROVIDERS di frontend/src/lib/portal.ts.
+EWALLET_PROVIDERS = ("DANA", "GoPay", "OVO", "ShopeePay")
+ACCOUNT_NUMBER_RE = re.compile(r"\d{6,20}")
+# Nomor HP Indonesia 10–13 digit, setelah awalan +62/62 diganti 0.
+PHONE_RE = re.compile(r"08\d{8,11}")
+MAX_PAYOUT_TEXT_LENGTH = 100
+# Di respons kreator hanya 4 karakter terakhir field ini yang terlihat.
+MASKED_PAYOUT_FIELDS = ("paypal_email", "account_number", "phone")
+
+
+def require_creator(user):
+    if user.role != "Creator":
+        raise HTTPException(status_code=403, detail="Akses ditolak.")
+
+
+def mask_value(value: str) -> str:
+    return "*" * max(len(value) - 4, 0) + value[-4:]
+
+
+def mask_payout_details(details: dict | None) -> dict | None:
+    if details is None:
+        return None
+    return {
+        key: mask_value(str(value)) if key in MASKED_PAYOUT_FIELDS and value else value
+        for key, value in details.items()
+    }
+
+
+def clean_payout_details(method: str, raw: dict) -> dict:
+    """Validasi data payout per metode; hanya field yang dikenal yang disimpan."""
+
+    def text(key: str, label: str) -> str:
+        value = str(raw.get(key) or "").strip()
+        if not value:
+            raise HTTPException(status_code=400, detail=f"{label} wajib diisi.")
+        if len(value) > MAX_PAYOUT_TEXT_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{label} maksimal {MAX_PAYOUT_TEXT_LENGTH} karakter.",
+            )
+        return value
+
+    def digits(key: str) -> str:
+        # Spasi, titik, dan strip pemisah angka diabaikan.
+        return re.sub(r"[\s.-]", "", str(raw.get(key) or ""))
+
+    if method == "paypal":
+        email = text("paypal_email", "Email PayPal").lower()
+        if not EMAIL_RE.fullmatch(email):
+            raise HTTPException(status_code=400, detail="Format email PayPal tidak valid.")
+        return {"paypal_email": email}
+
+    if method == "bank":
+        bank_name = text("bank_name", "Nama bank")
+        account_number = digits("account_number")
+        if not ACCOUNT_NUMBER_RE.fullmatch(account_number):
+            raise HTTPException(status_code=400, detail="Nomor rekening harus 6–20 digit angka.")
+        return {
+            "bank_name": bank_name,
+            "account_number": account_number,
+            "account_name": text("account_name", "Nama pemilik rekening"),
+        }
+
+    if method == "ewallet":
+        provider = str(raw.get("provider") or "").strip()
+        if provider not in EWALLET_PROVIDERS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Provider e-wallet harus salah satu dari: {', '.join(EWALLET_PROVIDERS)}.",
+            )
+        phone = re.sub(r"^\+?62", "0", digits("phone"))
+        if not PHONE_RE.fullmatch(phone):
+            raise HTTPException(
+                status_code=400,
+                detail="Nomor HP harus nomor Indonesia 10–13 digit (contoh 081234567890).",
+            )
+        return {
+            "provider": provider,
+            "phone": phone,
+            "account_name": text("account_name", "Nama pemilik akun"),
+        }
+
+    raise HTTPException(status_code=400, detail="Metode payout harus paypal, bank, atau ewallet.")
+
+
+def serialize_payout_preference(user: models.User) -> dict:
+    return {
+        "payout_method": user.payout_method,
+        "payout_details_masked": mask_payout_details(earnings.load_details(user.payout_details)),
+    }
+
+
+@app.get("/me/payout")
+def get_my_payout(current_user: models.User = Depends(get_current_user)):
+    require_creator(current_user)
+    return serialize_payout_preference(current_user)
+
+
+@app.put("/me/payout")
+def update_my_payout(
+    payload: schemas.PayoutPreferenceUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_creator(current_user)
+    method = payload.payout_method.strip().lower()
+    details = clean_payout_details(method, payload.payout_details)
+
+    current_user.payout_method = method
+    current_user.payout_details = json.dumps(details, ensure_ascii=False)
+    db.commit()
+    db.refresh(current_user)
+    return {"message": "Metode payout disimpan.", **serialize_payout_preference(current_user)}
 
 
 # ============================================================================
@@ -894,84 +1100,41 @@ def get_creator_dashboard(
     if current_user.role != "Creator":
         raise HTTPException(status_code=403)
 
-    proyek_aktif = []
-    grafik_harian = []
-    monthly_summary = {}
-    total_saldo = 0.0
-
-    # One joined query replaces the nested split -> content -> sales queries.
-    rows = (
-        db.query(models.CreatorSplit, models.Content, models.DailySales)
-        .join(
-            models.Content,
-            models.Content.id == models.CreatorSplit.content_id,
-        )
-        .join(
-            models.DailySales,
-            models.DailySales.content_id == models.Content.id,
-        )
-        .filter(models.CreatorSplit.user_id == current_user.id)
-        .all()
-    )
-
-    # Preserve projects even when a content has no sales.
+    # Hanya unit dan bagian kreator: harga, gross, net, split %, dan bagian
+    # Squareclouds tidak pernah dikirim ke kreator (lihat earnings.py).
     projects = (
-        db.query(models.CreatorSplit, models.Content)
-        .join(models.Content, models.Content.id == models.CreatorSplit.content_id)
+        db.query(models.Content)
+        .join(models.CreatorSplit, models.CreatorSplit.content_id == models.Content.id)
         .filter(models.CreatorSplit.user_id == current_user.id)
+        .order_by(models.Content.name)
         .all()
     )
-    proyek_aktif = [
-        {
-            "name": content.name,
-            "status": content.status,
-            "pack_type": content.pack_type,
-            "release_date": content.release_date,
-            "tier": content.tier,
-        }
-        for _, content in projects
-    ]
-
-    for split, content, record in rows:
-        earned = (
-            record.quantity
-            * content.price
-            * (split.split_percentage / 100)
-        )
-        total_saldo += earned
-
-        grafik_harian.append(
-            {
-                "date": record.date,
-                "content_name": content.name,
-                "quantity": record.quantity,
-            }
-        )
-
-        key = (record.date[:7], content.name)
-        summary = monthly_summary.setdefault(
-            key,
-            {
-                "month": record.date[:7],
-                "content_name": content.name,
-                "qty": 0,
-                "earned": 0.0,
-            },
-        )
-        summary["qty"] += record.quantity
-        summary["earned"] += earned
+    daily = (
+        db.query(models.DailySales.date, models.Content.name, models.DailySales.quantity)
+        .join(models.Content, models.Content.id == models.DailySales.content_id)
+        .join(models.CreatorSplit, models.CreatorSplit.content_id == models.Content.id)
+        .filter(models.CreatorSplit.user_id == current_user.id)
+        .order_by(models.DailySales.date)
+        .all()
+    )
 
     return {
         "nama": current_user.name,
         "job_title": current_user.job_title,
-        "total_saldo": total_saldo,
-        "proyek": proyek_aktif,
-        "grafik_harian": grafik_harian,
-        "riwayat_bulanan": sorted(
-            monthly_summary.values(),
-            key=lambda x: x["month"],
-            reverse=True,
-        ),
+        "proyek": [
+            {
+                "name": c.name,
+                "status": c.status,
+                "pack_type": c.pack_type,
+                "release_date": c.release_date,
+            }
+            for c in projects
+        ],
+        "grafik_harian": [
+            {"date": d, "content_name": name, "quantity": quantity}
+            for d, name, quantity in daily
+        ],
+        **earnings.creator_summary(db, current_user, include_internal=False),
     }
 
 

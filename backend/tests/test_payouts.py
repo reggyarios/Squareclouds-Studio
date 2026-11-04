@@ -1,4 +1,6 @@
 """Pendapatan kreator, payout, dan pengaturan (docs/payout-v2.2.md)."""
+import json
+
 import pytest
 
 import auth
@@ -216,3 +218,281 @@ def test_admin_overview_splits_net_between_creators_and_squareclouds(client):
         only_september = earnings.admin_overview(db, month="2026-09")
         assert only_september["totals"]["net_usd"] == 38.0
         assert [m["month"] for m in only_september["by_month"]] == ["2026-09"]
+
+
+# ============================================================================
+# ENDPOINT ADMIN
+# ============================================================================
+
+BANK = {"bank_name": "BCA", "account_number": "1234567890", "account_name": "Kreator Satu"}
+
+
+def login(client, email="creator@example.com"):
+    res = client.post("/login", data={"username": email, "password": CREATOR_PASSWORD})
+    assert res.status_code == 200, res.text
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def seed_creator(method=None, details=None):
+    """Kreator Active dengan satu konten: gross 100, net80 80 -> share 30% = 22,8."""
+    with SessionLocal() as db:
+        creator = add_creator(
+            db,
+            payout_method=method,
+            payout_details=None if details is None else json.dumps(details),
+        )
+        add_content(db, splits=[(creator, 30)], sales=[("2026-10-05", 10, 100.0, 80.0)])
+        db.commit()
+        return creator.id
+
+
+def test_settings_get_put_and_validation(client, admin_headers):
+    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 5.0, "idr_rate": 16500.0}
+
+    res = client.put("/settings", json={"paypal_fee_pct": 3.5, "idr_rate": 16250.5}, headers=admin_headers)
+    assert res.status_code == 200, res.text
+    assert res.json()["data"] == {"paypal_fee_pct": 3.5, "idr_rate": 16250.5}
+    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 3.5, "idr_rate": 16250.5}
+
+    for body in (
+        {"paypal_fee_pct": -0.1, "idr_rate": 16500},
+        {"paypal_fee_pct": 100.1, "idr_rate": 16500},
+        {"paypal_fee_pct": 5, "idr_rate": 0},
+        {"paypal_fee_pct": 5, "idr_rate": -1},
+    ):
+        assert client.put("/settings", json=body, headers=admin_headers).status_code == 400, body
+    assert client.put("/settings", json={"paypal_fee_pct": 5}, headers=admin_headers).status_code == 422
+    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 3.5, "idr_rate": 16250.5}
+
+    # Batas 0 dan 100 boleh.
+    for fee in (0, 100):
+        body = {"paypal_fee_pct": fee, "idr_rate": 1}
+        assert client.put("/settings", json=body, headers=admin_headers).status_code == 200
+    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 100.0, "idr_rate": 1.0}
+
+
+def test_settings_and_payout_endpoints_require_admin(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = client.post("/payouts", json={"user_id": creator_id, "amount_usd": 1}, headers=admin_headers).json()["data"]["id"]
+    headers = login(client)
+
+    assert client.get("/settings", headers=headers).status_code == 403
+    assert client.put("/settings", json={"paypal_fee_pct": 0, "idr_rate": 1}, headers=headers).status_code == 403
+    assert client.get(f"/users/{creator_id}/earnings", headers=headers).status_code == 403
+    assert client.post("/payouts", json={"user_id": creator_id, "amount_usd": 1}, headers=headers).status_code == 403
+    assert client.delete(f"/payouts/{payout_id}", headers=headers).status_code == 403
+    assert client.get("/settings").status_code == 401
+    with SessionLocal() as db:
+        assert db.query(models.Payout).count() == 1
+
+
+def test_fee_change_updates_creator_summary(client, admin_headers):
+    creator_id = seed_creator()
+    url = f"/users/{creator_id}/earnings"
+    assert client.get(url, headers=admin_headers).json()["total_earned_usd"] == 22.8
+
+    client.put("/settings", json={"paypal_fee_pct": 10, "idr_rate": 16500}, headers=admin_headers)
+    assert client.get(url, headers=admin_headers).json()["total_earned_usd"] == 21.6  # 80 × 0,9 × 30%
+    assert client.get("/creator-dashboard/", headers=login(client)).json()["total_earned_usd"] == 21.6
+
+
+def test_user_earnings_has_internal_fields_and_full_details(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    data = client.get(f"/users/{creator_id}/earnings", headers=admin_headers).json()
+    assert data["payout_method"] == "bank"
+    assert data["payout_details"] == BANK
+    assert data["by_content"][0]["gross_usd"] == 100.0
+    assert data["by_content"][0]["net_usd"] == 76.0
+    assert data["by_content"][0]["split_pct"] == 30
+    assert data["outstanding_idr"] == 376200.0
+
+    with SessionLocal() as db:
+        admin_id = db.query(models.User.id).filter(models.User.role == "Admin").scalar()
+    assert client.get(f"/users/{admin_id}/earnings", headers=admin_headers).status_code == 400
+    assert client.get("/users/999/earnings", headers=admin_headers).status_code == 404
+
+
+def test_create_payout_snapshots_method_and_reduces_outstanding(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    body = {"user_id": creator_id, "amount_usd": 10.004, "note": "  Oktober  ", "paid_at": "2026-11-03"}
+    res = client.post("/payouts", json=body, headers=admin_headers)
+    assert res.status_code == 201, res.text
+    payout = res.json()["data"]
+    assert payout["amount_usd"] == 10.0
+    assert payout["idr_rate"] == 16500.0
+    assert payout["amount_idr"] == 165000.0
+    assert payout["method"] == "bank"
+    assert payout["details"] == BANK
+    assert payout["note"] == "Oktober"
+    assert payout["paid_at"] == "2026-11-03"
+
+    # Kreator ganti metode setelahnya: snapshot di payout lama tidak berubah.
+    paypal = {"payout_method": "paypal", "payout_details": {"paypal_email": "k@pp.com"}}
+    assert client.put("/me/payout", json=paypal, headers=login(client)).status_code == 200
+    data = client.get(f"/users/{creator_id}/earnings", headers=admin_headers).json()
+    assert data["total_paid_usd"] == 10.0
+    assert data["outstanding_usd"] == 12.8
+    assert data["outstanding_idr"] is None
+    assert data["payouts"][0]["details"] == BANK
+
+    # PayPal: tanpa amount_idr. Seluruh saldo (seperti yang tampil, 2 desimal) boleh dibayar.
+    res = client.post("/payouts", json={"user_id": creator_id, "amount_usd": 12.8}, headers=admin_headers)
+    assert res.status_code == 201, res.text
+    assert res.json()["data"]["amount_idr"] is None
+    assert res.json()["data"]["method"] == "paypal"
+    assert client.get(f"/users/{creator_id}/earnings", headers=admin_headers).json()["outstanding_usd"] == 0.0
+
+
+def test_create_payout_rejections(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+
+    def post(body):
+        return client.post("/payouts", json=body, headers=admin_headers)
+
+    res = post({"user_id": creator_id, "amount_usd": 22.81})
+    assert res.status_code == 400
+    assert "melebihi saldo tertunda" in res.json()["detail"]
+    for amount in (0, -1, 0.004):
+        assert post({"user_id": creator_id, "amount_usd": amount}).status_code == 400, amount
+    assert post({"user_id": creator_id, "amount_usd": 1, "paid_at": "03-11-2026"}).status_code == 400
+    assert post({"user_id": 999, "amount_usd": 1}).status_code == 404
+
+    with SessionLocal() as db:
+        no_method = add_creator(db, "nomethod@example.com")
+        add_content(db, "Konten Lain", splits=[(no_method, 30)], sales=[("2026-10-05", 10, 100.0, 80.0)])
+        inactive = add_creator(
+            db, "inactive@example.com", payout_method="bank", payout_details=json.dumps(BANK)
+        )
+        inactive.account_status = "Inactive"
+        db.commit()
+        no_method_id, inactive_id = no_method.id, inactive.id
+
+    res = post({"user_id": no_method_id, "amount_usd": 1})
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Kreator belum mengisi metode payout."
+    assert post({"user_id": inactive_id, "amount_usd": 1}).status_code == 400
+
+    with SessionLocal() as db:
+        assert db.query(models.Payout).count() == 0
+
+
+def test_delete_payout_restores_outstanding(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    res = client.post("/payouts", json={"user_id": creator_id, "amount_usd": 5}, headers=admin_headers)
+    payout_id = res.json()["data"]["id"]
+    assert client.delete(f"/payouts/{payout_id}", headers=admin_headers).status_code == 200
+    assert client.delete(f"/payouts/{payout_id}", headers=admin_headers).status_code == 404
+    assert client.get(f"/users/{creator_id}/earnings", headers=admin_headers).json()["outstanding_usd"] == 22.8
+
+
+def test_delete_creator_also_deletes_payouts(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    client.post("/payouts", json={"user_id": creator_id, "amount_usd": 5}, headers=admin_headers)
+    assert client.delete(f"/users/{creator_id}", headers=admin_headers).status_code == 200
+    with SessionLocal() as db:
+        assert db.query(models.Payout).count() == 0
+
+
+def test_admin_reports_and_contents_use_overview(client, admin_headers):
+    seed_creator()
+    report = client.get("/admin-reports/", headers=admin_headers).json()["data"]
+    assert report["totals"]["net_usd"] == 76.0
+    assert report["totals"]["creators_share_usd"] == 22.8
+    assert report["totals"]["squareclouds_share_usd"] == 53.2
+    [month] = report["by_month"]
+    assert month["month"] == "2026-10"
+    assert month["by_content"][0]["squareclouds_share_usd"] == 53.2
+    assert client.get("/admin-reports/?month=2026-09", headers=admin_headers).json()["data"]["by_month"] == []
+
+    [content] = client.get("/contents/", headers=admin_headers).json()["data"]
+    assert (content["units_total"], content["gross_usd"], content["net_usd"]) == (10, 100.0, 76.0)
+
+
+# ============================================================================
+# ENDPOINT KREATOR
+# ============================================================================
+
+def put_payout(client, headers, method, details):
+    body = {"payout_method": method, "payout_details": details}
+    return client.put("/me/payout", json=body, headers=headers)
+
+
+def test_me_payout_validation_per_method(client):
+    seed_creator()
+    headers = login(client)
+    assert client.get("/me/payout", headers=headers).json() == {"payout_method": None, "payout_details_masked": None}
+
+    ewallet = {"provider": "DANA", "phone": "081234567890", "account_name": "K"}
+    invalid = [
+        ("paypal", {"paypal_email": "bukan-email"}),
+        ("paypal", {}),
+        ("bank", {**BANK, "account_number": "12345"}),
+        ("bank", {**BANK, "account_number": "1" * 21}),
+        ("bank", {**BANK, "account_number": "12345abc"}),
+        ("bank", {**BANK, "account_name": "  "}),
+        ("bank", {**BANK, "bank_name": ""}),
+        ("ewallet", {**ewallet, "provider": "LinkAja"}),
+        ("ewallet", {**ewallet, "phone": "081234567"}),  # 9 digit
+        ("ewallet", {**ewallet, "phone": "08123456789012"}),  # 14 digit
+        ("ewallet", {**ewallet, "phone": "071234567890"}),  # bukan nomor HP
+        ("ewallet", {"provider": "DANA", "phone": "081234567890"}),  # tanpa account_name
+        ("crypto", {"wallet": "x"}),
+    ]
+    for method, details in invalid:
+        assert put_payout(client, headers, method, details).status_code == 400, (method, details)
+    assert client.get("/me/payout", headers=headers).json()["payout_method"] is None
+
+    res = put_payout(client, headers, "paypal", {"paypal_email": " Kreator@PayPal.com ", "extra": "dibuang"})
+    assert res.status_code == 200, res.text
+    assert res.json()["payout_details_masked"] == {"paypal_email": "**************.com"}
+
+    res = put_payout(client, headers, "bank", {**BANK, "account_number": "1234-5678 90"})
+    assert res.status_code == 200, res.text
+    assert res.json()["payout_details_masked"] == {**BANK, "account_number": "******7890"}
+
+    res = put_payout(client, headers, "ewallet", {**ewallet, "provider": "GoPay", "phone": "+62 812-3456-7890"})
+    assert res.status_code == 200, res.text
+    masked = {"provider": "GoPay", "phone": "********7890", "account_name": "K"}
+    assert res.json()["payout_details_masked"] == masked
+    assert client.get("/me/payout", headers=headers).json() == {"payout_method": "ewallet", "payout_details_masked": masked}
+
+    with SessionLocal() as db:
+        creator = db.query(models.User).filter(models.User.role == "Creator").one()
+        assert earnings.load_details(creator.payout_details)["phone"] == "081234567890"
+
+
+def test_me_payout_only_for_creators(client, admin_headers):
+    assert client.get("/me/payout", headers=admin_headers).status_code == 403
+    assert put_payout(client, admin_headers, "paypal", {"paypal_email": "a@b.co"}).status_code == 403
+    assert client.get("/me/payout").status_code == 401
+
+
+FORBIDDEN_KEY_PARTS = ("gross", "net", "net80", "split", "price")
+
+
+def all_keys(value):
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield k
+            yield from all_keys(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from all_keys(v)
+
+
+def test_creator_dashboard_never_leaks_internal_money(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    client.post("/payouts", json={"user_id": creator_id, "amount_usd": 5, "note": "x"}, headers=admin_headers)
+
+    data = client.get("/creator-dashboard/", headers=login(client)).json()
+    leaked = [k for k in all_keys(data) if any(part in k.lower() for part in FORBIDDEN_KEY_PARTS)]
+    assert leaked == []
+    assert data["total_earned_usd"] == 22.8
+    assert data["total_paid_usd"] == 5.0
+    assert data["outstanding_usd"] == 17.8
+    assert data["outstanding_idr"] == 293700.0  # 17,8 × 16.500
+    assert data["by_content"][0]["units"] == 10
+    assert data["by_month"] == [{"month": "2026-10", "units": 10, "share_usd": 22.8}]
+    assert data["payouts"][0]["note"] == "x"
+    assert data["grafik_harian"] == [{"date": "2026-10-05", "content_name": "Royal Mansion", "quantity": 10}]
+    assert client.get("/creator-dashboard/", headers=admin_headers).status_code == 403

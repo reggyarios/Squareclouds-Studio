@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 
 # ==========================================
 # SCHEMA PORTAL KREATOR
@@ -29,6 +29,24 @@ class SplitItem(BaseModel):
 
 class SplitsReplace(BaseModel):
     splits: List[SplitItem]
+
+# ==========================================
+# SCHEMA PENDAPATAN & PAYOUT
+# ==========================================
+
+class SettingsUpdate(BaseModel):
+    paypal_fee_pct: float
+    idr_rate: float
+
+class PayoutCreate(BaseModel):
+    user_id: int
+    amount_usd: float
+    note: Optional[str] = None
+    paid_at: Optional[str] = None  # YYYY-MM-DD, default hari ini (UTC)
+
+class PayoutPreferenceUpdate(BaseModel):
+    payout_method: str  # paypal | bank | ewallet
+    payout_details: Dict[str, Any]
 
 # ==========================================
 # SCHEMA UNTUK CMS LANDING PAGE
