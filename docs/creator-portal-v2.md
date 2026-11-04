@@ -104,7 +104,11 @@ Tambahkan contoh variabel ini ke `backend/.env.example` (buat file itu, tanpa ni
   urut `account_status` (Pending dulu) lalu `created_at` terbaru.
 - `PUT /users/{id}`: boleh ubah `name, job_title, account_status` (hanya nilai `Active|Inactive`).
   **Tidak ada field password** — admin tidak bisa mengubah password siapa pun. Tidak boleh mengubah akun Admin.
-- `DELETE /users/{id}`: tetap ada (dipakai untuk **menolak** pendaftar Pending). Hapus juga split-nya. Tidak boleh untuk Admin.
+- `DELETE /users/{id}`: dipakai untuk **menolak** pendaftar Pending dan untuk **menghapus** akun kreator
+  Active/Inactive. Hapus juga semua `creator_splits` dan `earning_history` milik user itu, eksplisit lewat query
+  sebelum `db.delete(user)` (FK ke `users` tidak punya `ON DELETE`; relationship cascade di `models.User` juga
+  mencakupnya). Konten dan split kreator lain tidak tersentuh. Tidak boleh untuk Admin (400
+  `"Akun Admin tidak bisa diubah dari sini."`, bukan 403 karena frontend menganggap 403 sesi berakhir).
 
 ### 2.3 Konten (read-only dari Pathway) & split
 - **Hapus** `POST /contents/`, `DELETE /contents/{id}`, `POST /splits/`.
@@ -167,6 +171,9 @@ Susunan tab/bagian:
    - Badge jumlah pending (undangan + pendaftar) di judul tab.
 2. **Kreator** — `account_status` Active/Inactive: nama, username (`-` untuk akun lama), email, job title (editable select), status toggle
    Aktif/Nonaktif, jumlah konten tertaut. **Tidak ada** reset password.
+   Tombol **Hapus** per baris → `confirm()` yang menyebut nama, email, dan jumlah konten tertaut (split-nya dan
+   riwayat pendapatan ikut dihapus, tidak bisa dibatalkan) → `DELETE /users/{id}`. Setelah berhasil, muat ulang
+   daftar kreator **dan** daftar konten (split kreator itu hilang dari tab Konten).
 3. **Konten** — tabel read-only dari Pathway: nama, badge status (`Published` hijau, `Pending Release`/`Submissions`
    kuning, `In Development`/`Review` abu), pack type, tier, harga, tanggal rilis, total unit, dan daftar kreator
    tertaut (nama + %). Tombol **Atur split** per baris → modal: daftar kreator Active dengan checkbox + input %,
@@ -192,6 +199,8 @@ Susunan tab/bagian:
 4. Admin: tab Konten menampilkan 18 konten dari Pathway dengan status & tier; Atur split untuk "Royal Mansion"
    ke kreator tersebut 30% → tersimpan; total > 80% ditolak dengan pesan.
 5. Kreator yang tertaut melihat "Royal Mansion" di dashboard-nya dengan angka penjualan; kreator lain tidak.
+   Admin menghapus kreator uji dari tab Kreator → dialog menyebut nama, email, dan jumlah konten → setelah
+   dikonfirmasi kreator hilang dari daftar, split-nya hilang dari tab Konten, dan akun itu tidak bisa login lagi.
 6. `curl api/users/` tanpa token → 401; `curl -X POST api/contents/` → 405/404 (endpoint tidak ada).
 7. `npm run build` bersih tanpa error TypeScript.
 

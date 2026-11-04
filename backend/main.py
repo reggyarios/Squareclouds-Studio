@@ -660,9 +660,10 @@ def delete_user(
     require_admin(current_user)
     user = get_creator_or_error(db, user_id)
 
-    db.query(models.CreatorSplit).filter(
-        models.CreatorSplit.user_id == user_id
-    ).delete()
+    # FK ke users tidak punya ON DELETE, jadi split dan riwayat pendapatan
+    # dihapus dulu (relationship cascade di models.User juga mencakupnya).
+    for model in (models.CreatorSplit, models.EarningHistory):
+        db.query(model).filter(model.user_id == user_id).delete()
     db.delete(user)
     db.commit()
 

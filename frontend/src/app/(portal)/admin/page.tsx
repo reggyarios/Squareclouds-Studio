@@ -282,6 +282,28 @@ export default function AdminDashboard() {
     );
   };
 
+  // runUserAction memuat ulang daftar kreator dan konten: split kreator ini
+  // ikut terhapus di backend.
+  const handleDelete = (u: Creator) => {
+    const linked = linkedCount[u.id] || 0;
+    const linkedText =
+      linked > 0
+        ? `Tertaut ke ${linked} konten; split-nya di konten tersebut ikut dihapus.`
+        : "Belum tertaut ke konten mana pun.";
+    if (
+      !confirm(
+        `Hapus akun ${u.name} (${u.email}) secara permanen?\n\n${linkedText}\n` +
+          "Riwayat pendapatan kreator ini juga ikut dihapus. Tindakan ini tidak bisa dibatalkan."
+      )
+    )
+      return;
+    runUserAction(
+      u,
+      () => api(`/users/${u.id}`, { method: "DELETE" }),
+      `Akun ${u.name} dihapus.`
+    );
+  };
+
   const handleJobChange = (u: Creator, jobTitle: string) =>
     runUserAction(
       u,
@@ -675,12 +697,15 @@ export default function AdminDashboard() {
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
                       Konten
                     </th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase text-center">
+                      Aksi
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
                   {creators.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="text-center py-8 text-gray-400 font-bold">
+                      <td colSpan={7} className="text-center py-8 text-gray-400 font-bold">
                         Belum ada kreator yang disetujui.
                       </td>
                     </tr>
@@ -726,6 +751,15 @@ export default function AdminDashboard() {
                           </td>
                           <td className="px-6 py-4 text-center text-sm font-bold text-gray-700">
                             {linkedCount[u.id] || 0}
+                          </td>
+                          <td className="px-6 py-4 text-center">
+                            <button
+                              onClick={() => handleDelete(u)}
+                              disabled={busyId === u.id}
+                              className="bg-red-50 text-red-600 px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50"
+                            >
+                              Hapus
+                            </button>
                           </td>
                         </tr>
                       );
