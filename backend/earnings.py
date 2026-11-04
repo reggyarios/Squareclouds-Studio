@@ -163,7 +163,8 @@ def serialize_payout(payout: models.Payout, include_internal: bool) -> dict:
 
 
 def creator_summary(db: Session, user: models.User, include_internal: bool) -> dict:
-    """Pendapatan, pembayaran, dan saldo tertunda satu kreator.
+    """Pendapatan, pembayaran, dan saldo tertunda satu kreator (USD, plus
+    perkiraan rupiah kalau metode payout-nya bank/e-wallet).
 
     include_internal=False (respons kreator) hanya berisi unit dan bagian
     kreator: tidak ada gross, net80, net, split %, maupun bagian Squareclouds.
@@ -231,14 +232,19 @@ def creator_summary(db: Session, user: models.User, include_internal: bool) -> d
     paid = sum(p.amount_usd for p in payouts)
     outstanding = earned - paid
 
+    # Perkiraan rupiah dengan kurs saat ini, hanya untuk payout bank/e-wallet.
+    # Rupiah yang benar-benar dibayar ada di amount_idr tiap payout.
+    def approx_idr(usd: float) -> float | None:
+        return money(to_idr(usd, rate)) if user.payout_method in IDR_METHODS else None
+
     return {
         "total_earned_usd": money(earned),
         "total_paid_usd": money(paid),
         "outstanding_usd": money(outstanding),
         "idr_rate": rate,
-        "outstanding_idr": (
-            money(to_idr(outstanding, rate)) if user.payout_method in IDR_METHODS else None
-        ),
+        "total_earned_idr": approx_idr(earned),
+        "total_paid_idr": approx_idr(paid),
+        "outstanding_idr": approx_idr(outstanding),
         "by_content": by_content,
         "by_month": by_month,
         "payouts": [serialize_payout(p, include_internal) for p in payouts],

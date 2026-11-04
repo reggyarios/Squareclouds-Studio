@@ -146,16 +146,22 @@ def test_fee_setting_changes_summary(client):
         assert summary["by_content"][0]["net_usd"] == 72.0
 
 
-def test_outstanding_idr_only_for_rupiah_methods(client):
+def test_idr_amounts_only_for_rupiah_methods(client):
+    idr_keys = ("total_earned_idr", "total_paid_idr", "outstanding_idr")
     with SessionLocal() as db:
         creator = add_creator(db)
         add_content(db, splits=[(creator, 30)], sales=[("2026-10-05", 10, 100.0, 80.0)])
+        add_payout(db, creator, 2.8)
 
-        assert earnings.creator_summary(db, creator, False)["outstanding_idr"] is None
-        creator.payout_method = "paypal"
-        assert earnings.creator_summary(db, creator, False)["outstanding_idr"] is None
-        creator.payout_method = "bank"
-        assert earnings.creator_summary(db, creator, False)["outstanding_idr"] == 376200.0  # 22,8 × 16.500
+        for method in (None, "paypal"):
+            creator.payout_method = method
+            summary = earnings.creator_summary(db, creator, False)
+            assert [summary[k] for k in idr_keys] == [None, None, None], method
+        for method in ("bank", "ewallet"):
+            creator.payout_method = method
+            summary = earnings.creator_summary(db, creator, False)
+            # 22,8 / 2,8 / 20 × 16.500
+            assert [summary[k] for k in idr_keys] == [376200.0, 46200.0, 330000.0], method
 
 
 def test_creator_summary_internal_fields_only_for_admin(client):
