@@ -19,6 +19,8 @@ type Invitation = {
 type Creator = {
   id: number;
   name: string;
+  // null untuk akun lama yang dibuat sebelum ada username.
+  username: string | null;
   email: string;
   role: string;
   job_title: string | null;
@@ -589,6 +591,9 @@ export default function AdminDashboard() {
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Nama</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
+                      Username
+                    </th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Email</th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
                       Job Title
@@ -604,7 +609,7 @@ export default function AdminDashboard() {
                 <tbody>
                   {pendingUsers.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-8 text-gray-400 font-bold">
+                      <td colSpan={6} className="text-center py-8 text-gray-400 font-bold">
                         Tidak ada pendaftar yang menunggu persetujuan.
                       </td>
                     </tr>
@@ -612,6 +617,7 @@ export default function AdminDashboard() {
                     pendingUsers.map((u) => (
                       <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50/50">
                         <td className="px-6 py-4 font-bold text-gray-900">{u.name}</td>
+                        <td className="px-6 py-4 text-sm text-gray-700">{u.username || "-"}</td>
                         <td className="px-6 py-4 text-sm text-gray-700">{u.email}</td>
                         <td className="px-6 py-4 text-sm text-gray-700">{u.job_title || "-"}</td>
                         <td className="px-6 py-4 text-sm text-gray-700">
@@ -658,6 +664,9 @@ export default function AdminDashboard() {
                 <thead className="bg-gray-50 border-b border-gray-100">
                   <tr>
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Nama</th>
+                    <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
+                      Username
+                    </th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">Email</th>
                     <th className="px-6 py-4 text-xs font-bold text-gray-500 uppercase">
                       Job Title
@@ -671,7 +680,7 @@ export default function AdminDashboard() {
                 <tbody>
                   {creators.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-8 text-gray-400 font-bold">
+                      <td colSpan={6} className="text-center py-8 text-gray-400 font-bold">
                         Belum ada kreator yang disetujui.
                       </td>
                     </tr>
@@ -681,6 +690,7 @@ export default function AdminDashboard() {
                       return (
                         <tr key={u.id} className="border-b border-gray-50 hover:bg-gray-50/50">
                           <td className="px-6 py-4 font-bold text-gray-900">{u.name}</td>
+                          <td className="px-6 py-4 text-sm text-gray-700">{u.username || "-"}</td>
                           <td className="px-6 py-4 text-sm text-gray-700">{u.email}</td>
                           <td className="px-6 py-4">
                             <select

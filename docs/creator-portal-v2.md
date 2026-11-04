@@ -29,7 +29,12 @@ Tambah ke `models.User`:
 ```python
 account_status = Column(String, nullable=False, default="Pending", server_default="Pending")  # Pending | Active | Inactive
 created_at     = Column(String, nullable=True)   # ISO timestamp UTC saat daftar
+username       = Column(String, unique=True, nullable=True, index=True)  # 3–20 karakter [a-z0-9_], disimpan lowercase
 ```
+
+`username` nullable karena akun lama dibuat sebelum ada username; akun itu tetap login pakai email.
+Aturan username (dicek backend dan frontend, harus sama): 3–20 karakter, hanya huruf kecil, angka, dan underscore.
+Karena tidak boleh mengandung `@`, username tidak pernah tertukar dengan email saat login.
 
 Tabel baru `invitations` (model `Invitation`):
 
@@ -45,9 +50,11 @@ used_at     String, nullable=True   # diisi saat kreator selesai mendaftar
 
 Buat `backend/scripts/migrate_add_user_status.py` dengan pola yang sama seperti
 `scripts/migrate_add_pathway_columns.py` (ALTER TABLE ... ADD COLUMN IF NOT EXISTS untuk kolom users,
-lalu `Base.metadata.create_all` untuk tabel `invitations`), dan di akhir:
+`CREATE UNIQUE INDEX IF NOT EXISTS ix_users_username ON users (username)` — nama index sama dengan yang dibuat
+`create_all` —, lalu `Base.metadata.create_all` untuk tabel `invitations`), dan di akhir:
 `UPDATE users SET account_status='Active' WHERE role='Admin'`.
-Catat di docstring bahwa skrip ini harus dijalankan di server sebelum deploy versi ini.
+Catat di docstring bahwa skrip ini harus dijalankan di server sebelum deploy versi ini, dan dijalankan **lagi**
+kalau sudah pernah dijalankan sebelum kolom `username` ditambahkan (skrip aman diulang).
 
 ## 2. Backend (`backend/main.py`, `backend/schemas.py`)
 
@@ -69,12 +76,22 @@ Tambahkan contoh variabel ini ke `backend/.env.example` (buat file itu, tanpa ni
 - `DELETE /invitations/{id}` (admin): batalkan undangan.
 - `GET /register/{token}` (publik): validasi token → 200 `{"email": ...}` atau 404/410 dengan `detail`
   ("Undangan tidak ditemukan" / "Undangan sudah kedaluwarsa" / "Undangan sudah dipakai").
-- `POST /register` (publik). Body: `token, name, password, job_title`.
+- `POST /register` (publik). Body: `token, username, name, password, job_title`.
   - Token harus valid (sama seperti GET). Email **diambil dari undangan**, bukan dari body.
-  - Validasi: nama wajib; password ≥ 8; `job_title` salah satu dari `Builder, Skin Artist, Developer, Keyart Artist, Other`.
-  - Simpan user `role="Creator"`, `account_status="Pending"`, `created_at=now`, password di-hash; set `used_at` undangan.
+  - Validasi: `username` wajib, di-`strip().lower()` lalu harus cocok dengan aturan username (400 kalau tidak),
+    dan belum dipakai akun lain (400 `"Username sudah dipakai"`); nama wajib (nama tampilan); password ≥ 8;
+    `job_title` salah satu dari `Builder, Skin Artist, Developer, Keyart Artist, Other`.
+    Request tanpa field `username` → 422. Undangan **tidak** hangus kalau pendaftaran ditolak validasi.
+  - Simpan user `role="Creator"`, `account_status="Pending"`, `created_at=now`, `username` (lowercase),
+    password di-hash; set `used_at` undangan.
   - Respons 201 `{"message": "Pendaftaran diterima. Tunggu persetujuan admin."}`. Jangan kembalikan token.
   - Buat endpoint ini dalam satu transaksi (user + used_at), supaya token tidak bisa dipakai dua kali.
+    Kalau commit gagal karena unique constraint (balapan dua pendaftaran), rollback dan kembalikan 400
+    `"Username sudah dipakai"` atau `"Email sudah terdaftar!"` sesuai yang bentrok.
+- `POST /login`: field `username` dari form OAuth2 boleh berisi **email atau username**. Input di-`strip().lower()`;
+  kalau mengandung `@` dicocokkan ke `email`, selain itu ke `username` (keduanya case-insensitive, `func.lower` di kolom).
+  User tidak ditemukan atau password salah → 401 `"Email/username atau password salah"` (generik, tidak membocorkan
+  mana yang salah). Token JWT tetap memakai email sebagai `sub`.
 - `POST /login`: setelah password cocok, jika `account_status != "Active"` → 403
   `{"detail": "Akun belum disetujui admin."}` (Pending) atau `"Akun dinonaktifkan."` (Inactive).
   Admin selalu boleh login.
@@ -82,7 +99,8 @@ Tambahkan contoh variabel ini ke `backend/.env.example` (buat file itu, tanpa ni
 
 ### 2.2 Manajemen kreator (semua admin-only, pakai `require_admin`)
 - **Hapus** `POST /users/`.
-- `GET /users/`: kembalikan `id, name, email, role, job_title, account_status, created_at`, hanya `role="Creator"`,
+- `GET /users/`: kembalikan `id, name, username, email, role, job_title, account_status, created_at`
+  (`username` bisa `null` untuk akun lama), hanya `role="Creator"`,
   urut `account_status` (Pending dulu) lalu `created_at` terbaru.
 - `PUT /users/{id}`: boleh ubah `name, job_title, account_status` (hanya nilai `Active|Inactive`).
   **Tidak ada field password** — admin tidak bisa mengubah password siapa pun. Tidak boleh mengubah akun Admin.
@@ -101,7 +119,7 @@ Tambahkan contoh variabel ini ke `backend/.env.example` (buat file itu, tanpa ni
 - `/creator-dashboard/`: tambahkan ke tiap proyek aktif `status, pack_type, release_date, tier`. Logika uang tetap.
 - `/admin-reports/`: tetap, tidak diubah.
 - Hapus endpoint `/sync-pathway-daily/`, file `crawler.py`, `scripts/cleanup_uploads.py`, dan `import math` kalau sudah tak dipakai.
-- Skema Pydantic baru: `InvitationCreate`, `UserRegister` (token, name, password, job_title), `UserStatusUpdate`
+- Skema Pydantic baru: `InvitationCreate`, `UserRegister` (token, username, name, password, job_title), `UserStatusUpdate`
   (ganti `UserUpdate`), `SplitsReplace`. Hapus `UserCreate`, `ContentCreate`, `ContentUpdate`, `SplitCreate`, `SplitUpdate`.
 
 ## 3. Frontend (`frontend/src`)
@@ -114,7 +132,10 @@ Aturan umum: semua panggilan API lewat `apiUrl()` dari `lib/api.ts` (hapus URL h
 ### 3.1 Halaman daftar via undangan: `app/(portal)/register/page.tsx`
 - Baca `token` dari query string. Saat dimuat, panggil `GET /register/{token}`:
   - gagal → tampilkan `detail` dari server (tidak ada form, hanya pesan + link ke `/login`);
-  - sukses → tampilkan email (read-only) dan form: Nama, Password (+ konfirmasi), Job title (select). Tombol "Buat akun".
+  - sukses → tampilkan email (read-only) dan form: Username (dengan keterangan aturannya, langsung diubah ke
+    lowercase saat diketik, dicek dengan `pattern` dan sebelum kirim), Nama, Password (+ konfirmasi),
+    Job title (select). Tombol "Buat akun". Aturan username disimpan di `lib/portal.ts`
+    (`USERNAME_PATTERN`, `USERNAME_HINT`) dan harus sama dengan `USERNAME_RE` di `backend/main.py`.
 - Tanpa `token` di URL → tampilkan "Pendaftaran hanya lewat undangan. Hubungi admin Squareclouds Studio."
 - Sukses → pesan dari server + link ke `/login`. Gagal → `detail` dari server.
 - **Tidak ada** tautan "Daftar" di halaman login.
@@ -122,6 +143,8 @@ Aturan umum: semua panggilan API lewat `apiUrl()` dari `lib/api.ts` (hapus URL h
 
 ### 3.2 `app/(portal)/login/page.tsx`
 - Hapus subjudul "Masuk ke portal pendapatan kreator".
+- Label field pertama: **"Email atau username"**, input `type="text"` (bukan `email`, supaya username bisa diketik),
+  dikirim sebagai field `username` form login.
 - Jika respons 403, tampilkan `detail` apa adanya (pesan Pending/Inactive), bukan "email/password salah".
 
 ### 3.3 `proxy.ts`
@@ -139,10 +162,10 @@ Susunan tab/bagian:
      Jika `sent: false`, tampilkan peringatan "Email belum terkirim (SMTP belum dikonfigurasi)".
    - Tengah: daftar undangan yang belum dipakai (`GET /invitations`): email, dikirim kapan, kedaluwarsa kapan,
      badge "Kedaluwarsa" bila perlu; tombol **Kirim ulang** (POST lagi dengan email yang sama) dan **Batalkan**.
-   - Bawah: kreator `account_status=Pending` (sudah mengisi form): nama, email, job title, tanggal daftar.
+   - Bawah: kreator `account_status=Pending` (sudah mengisi form): nama, username, email, job title, tanggal daftar.
      Tombol **Setujui** (`PUT /users/{id}` → `Active`) dan **Tolak** (konfirmasi, lalu `DELETE /users/{id}`).
    - Badge jumlah pending (undangan + pendaftar) di judul tab.
-2. **Kreator** — `account_status` Active/Inactive: nama, email, job title (editable select), status toggle
+2. **Kreator** — `account_status` Active/Inactive: nama, username (`-` untuk akun lama), email, job title (editable select), status toggle
    Aktif/Nonaktif, jumlah konten tertaut. **Tidak ada** reset password.
 3. **Konten** — tabel read-only dari Pathway: nama, badge status (`Published` hijau, `Pending Release`/`Submissions`
    kuning, `In Development`/`Review` abu), pack type, tier, harga, tanggal rilis, total unit, dan daftar kreator
@@ -161,8 +184,9 @@ Susunan tab/bagian:
 ## 5. Kriteria selesai (uji manual setelah deploy)
 1. Admin kirim undangan ke email uji → email masuk (atau tercetak di log kalau SMTP belum diisi) berisi link `/register?token=...`.
    `POST /register` tanpa token / token salah → 404; token yang sudah dipakai → 410.
-2. Buka link → form muncul dengan email terkunci → isi → 201. Login akun Pending → 403 "belum disetujui";
-   setelah admin Setujui → login sukses, masuk `/creator`.
+2. Buka link → form muncul dengan email terkunci → isi (termasuk username) → 201. Login akun Pending → 403 "belum disetujui";
+   setelah admin Setujui → login sukses, masuk `/creator`, baik dengan email maupun username.
+   Mendaftar dengan username yang sudah dipakai → 400 "Username sudah dipakai".
 3. Admin: tab Undangan & Pendaftar menampilkan undangan lalu pendaftar; Setujui memindahkannya ke tab Kreator.
    `curl -X POST api/invitations` tanpa token → 401.
 4. Admin: tab Konten menampilkan 18 konten dari Pathway dengan status & tier; Atur split untuk "Royal Mansion"
@@ -174,5 +198,6 @@ Susunan tab/bagian:
 ## 6. Urutan deploy (dikerjakan manusia, bukan Claude Code)
 0. Isi `SMTP_*`, `MAIL_FROM`, `PORTAL_URL` di `backend/.env` server (lihat `.env.example`).
 1. `git pull` di server, `venv/bin/python scripts/migrate_add_user_status.py`
+   (jalankan lagi walau sudah pernah: menambah kolom `username` + index-nya; aman diulang)
 2. `./deploy.sh local` (atau `./deploy.sh` kalau sudah push)
 3. Jalankan kriteria 1–6.

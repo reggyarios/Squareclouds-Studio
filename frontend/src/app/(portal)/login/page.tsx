@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { apiUrl } from "@/lib/api";
 
 export default function LoginPage() {
-  const [email, setEmail] = useState("");
+  // Email atau username; backend membedakannya dari ada/tidaknya "@".
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -18,7 +19,7 @@ export default function LoginPage() {
 
     try {
       const formData = new URLSearchParams();
-      formData.append("username", email);
+      formData.append("username", identifier);
       formData.append("password", password);
 
       const res = await fetch(apiUrl("/login"), {
@@ -37,7 +38,7 @@ export default function LoginPage() {
       }
 
       if (!res.ok) {
-        throw new Error(data.detail || "Gagal login. Periksa email dan password.");
+        throw new Error(data.detail || "Gagal login. Periksa email/username dan password.");
       }
 
       localStorage.setItem("token", data.access_token);
@@ -70,14 +71,17 @@ export default function LoginPage() {
         <form className="mt-8 space-y-6" onSubmit={handleLogin}>
           <div className="space-y-4 rounded-md shadow-sm">
             <div>
-              <label className="block text-sm font-medium text-gray-700">Email</label>
+              <label className="block text-sm font-medium text-gray-700">Email atau username</label>
               <input
-                type="email"
+                type="text"
                 required
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
                 className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:outline-none focus:ring-blue-500 sm:text-sm"
-                placeholder="email@studio.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                placeholder="email@studio.com atau username"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
               />
             </div>
             <div>

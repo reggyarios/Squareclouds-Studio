@@ -23,6 +23,15 @@ class User(Base):
 
     name = Column(String, nullable=False, index=True)
 
+    # 3-20 karakter [a-z0-9_], disimpan lowercase. Nullable untuk akun lama
+    # yang dibuat sebelum ada username; akun itu tetap login pakai email.
+    username = Column(
+        String,
+        unique=True,
+        nullable=True,
+        index=True,
+    )
+
     email = Column(
         String,
         unique=True,

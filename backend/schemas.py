@@ -12,6 +12,7 @@ class UserRegister(BaseModel):
     # Opsional supaya request tanpa token dijawab 404 "Undangan tidak
     # ditemukan", bukan 422. Email diambil dari undangan, bukan dari body.
     token: Optional[str] = None
+    username: str
     name: str
     password: str
     job_title: str

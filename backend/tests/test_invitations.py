@@ -23,6 +23,7 @@ def token_from(mail):
 def register(client, token, **overrides):
     body = {
         "token": token,
+        "username": "kreator_baru",
         "name": "Kreator Baru",
         "password": CREATOR_PASSWORD,
         "job_title": "Builder",
@@ -93,6 +94,64 @@ def test_login_pending_then_approved_ignores_email_case(client, admin_headers, o
     res = client.post("/login", data=login)
     assert res.status_code == 200, res.text
     assert res.json()["role"] == "Creator"
+
+
+def test_login_with_username_or_email(client, admin_headers, outbox):
+    invite(client, admin_headers, "creator@example.com")
+    res = register(client, token_from(outbox[0]), username="  Kreator_01 ")
+    assert res.status_code == 201, res.text
+
+    [user] = find(models.User, models.User.role == "Creator")
+    assert user.username == "kreator_01"
+    client.put(f"/users/{user.id}", json={"account_status": "Active"}, headers=admin_headers)
+
+    [listed] = client.get("/users/", headers=admin_headers).json()["data"]
+    assert listed["username"] == "kreator_01"
+    assert listed["email"] == "creator@example.com"
+
+    for identifier in ("kreator_01", "KREATOR_01", "creator@example.com"):
+        res = client.post("/login", data={"username": identifier, "password": CREATOR_PASSWORD})
+        assert res.status_code == 200, (identifier, res.text)
+        assert res.json()["role"] == "Creator"
+
+    # Pesan tetap generik: tidak membocorkan apakah username/email terdaftar.
+    for identifier, password in (
+        ("kreator_01", "password-salah"),
+        ("tidak_ada", CREATOR_PASSWORD),
+        ("tidak.ada@example.com", CREATOR_PASSWORD),
+    ):
+        res = client.post("/login", data={"username": identifier, "password": password})
+        assert res.status_code == 401
+        assert res.json()["detail"] == "Email/username atau password salah"
+
+
+def test_register_rejects_duplicate_username(client, admin_headers, outbox):
+    invite(client, admin_headers, "satu@example.com")
+    invite(client, admin_headers, "dua@example.com")
+    first, second = token_from(outbox[0]), token_from(outbox[1])
+    assert register(client, first, username="kreator_satu").status_code == 201
+
+    res = register(client, second, username="Kreator_Satu")
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Username sudah dipakai"
+
+    # Undangan kedua tidak hangus: bisa dipakai lagi dengan username lain.
+    assert client.get(f"/register/{second}").status_code == 200
+    assert register(client, second, username="kreator_dua").status_code == 201
+    assert len(find(models.User, models.User.role == "Creator")) == 2
+
+
+def test_register_validates_username(client, admin_headers, outbox):
+    invite(client, admin_headers, "creator@example.com")
+    token = token_from(outbox[0])
+
+    for username in ("ab", "a" * 21, "nama kreator", "nama-kreator", "kreator@studio", "   "):
+        res = register(client, token, username=username)
+        assert res.status_code == 400, username
+
+    body = {"token": token, "name": "Kreator", "password": CREATOR_PASSWORD, "job_title": "Builder"}
+    assert client.post("/register", json=body).status_code == 422
+    assert not find(models.User, models.User.role == "Creator")
 
 
 def test_wrong_or_missing_token_is_404(client):

@@ -4,7 +4,7 @@ import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { apiErrorMessage, apiUrl } from "@/lib/api";
-import { JOB_OPTIONS } from "@/lib/portal";
+import { JOB_OPTIONS, USERNAME_HINT, USERNAME_PATTERN } from "@/lib/portal";
 
 const MIN_PASSWORD_LENGTH = 8;
 
@@ -53,6 +53,7 @@ function RegisterForm() {
   const token = useSearchParams().get("token");
   const [invite, setInvite] = useState<Invite>({ state: "checking" });
   const [form, setForm] = useState({
+    username: "",
     name: "",
     password: "",
     confirmPassword: "",
@@ -93,6 +94,10 @@ function RegisterForm() {
     e.preventDefault();
     setError("");
 
+    if (!new RegExp(`^${USERNAME_PATTERN}$`).test(form.username)) {
+      setError(`Username ${USERNAME_HINT}`);
+      return;
+    }
     if (form.password.length < MIN_PASSWORD_LENGTH) {
       setError(`Password minimal ${MIN_PASSWORD_LENGTH} karakter.`);
       return;
@@ -109,6 +114,7 @@ function RegisterForm() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           token,
+          username: form.username,
           name: form.name,
           password: form.password,
           job_title: form.job_title,
@@ -156,6 +162,26 @@ function RegisterForm() {
               className={`${inputClass} cursor-not-allowed bg-gray-100 text-gray-500`}
               value={invite.email}
             />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Username</label>
+            {/* Disimpan lowercase, jadi langsung ditampilkan lowercase. */}
+            <input
+              type="text"
+              required
+              pattern={USERNAME_PATTERN}
+              title={USERNAME_HINT}
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              className={inputClass}
+              placeholder="nama_kamu"
+              value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase() })}
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              {USERNAME_HINT} Bisa dipakai untuk masuk selain email.
+            </p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700">Nama</label>

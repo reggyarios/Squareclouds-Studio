@@ -259,17 +259,20 @@ def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ):
+    # Field `username` dari form OAuth2 boleh berisi email atau username.
+    # Username tidak boleh mengandung "@", jadi keduanya tidak tertukar.
     # Email baru selalu disimpan lowercase; lower() di kolom juga mencocokkan
     # akun lama yang tersimpan dengan huruf besar.
-    email = form_data.username.strip().lower()
+    identifier = form_data.username.strip().lower()
+    column = models.User.email if "@" in identifier else models.User.username
     user = (
         db.query(models.User)
-        .filter(func.lower(models.User.email) == email)
+        .filter(func.lower(column) == identifier)
         .first()
     )
 
     if not user or not auth.verify_password(form_data.password, user.password):
-        raise HTTPException(status_code=401, detail="Email atau password salah")
+        raise HTTPException(status_code=401, detail="Email/username atau password salah")
 
     if user.role != "Admin" and user.account_status != "Active":
         raise HTTPException(
@@ -298,6 +301,8 @@ def login(
 
 JOB_TITLES = ("Builder", "Skin Artist", "Developer", "Keyart Artist", "Other")
 EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+# Sama dengan USERNAME_PATTERN di frontend/src/lib/portal.ts.
+USERNAME_RE = re.compile(r"[a-z0-9_]{3,20}")
 MIN_PASSWORD_LENGTH = 8
 INVITATION_VALID_DAYS = 7
 DEFAULT_PORTAL_URL = "https://creator.squarecloudsmc.com"
@@ -315,6 +320,15 @@ def email_registered(db: Session, email: str) -> bool:
     return (
         db.query(models.User.id)
         .filter(func.lower(models.User.email) == email)
+        .first()
+        is not None
+    )
+
+
+def username_taken(db: Session, username: str) -> bool:
+    return (
+        db.query(models.User.id)
+        .filter(func.lower(models.User.username) == username)
         .first()
         is not None
     )
@@ -472,13 +486,19 @@ def check_invitation(token: str, db: Session = Depends(get_db)):
 def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
     invitation = get_valid_invitation(db, payload.token)
     email = invitation.email.lower()
+    username = payload.username.strip().lower()
     name = payload.name.strip()
     job_title = payload.job_title.strip()
 
-    if not name or not payload.password or not job_title:
+    if not username or not name or not payload.password or not job_title:
         raise HTTPException(
             status_code=400,
-            detail="Nama, password, dan job title wajib diisi.",
+            detail="Username, nama, password, dan job title wajib diisi.",
+        )
+    if not USERNAME_RE.fullmatch(username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username 3–20 karakter, hanya huruf kecil, angka, dan underscore.",
         )
     if len(payload.password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
@@ -489,6 +509,8 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Job title tidak valid.")
     if email_registered(db, email):
         raise HTTPException(status_code=400, detail="Email sudah terdaftar!")
+    if username_taken(db, username):
+        raise HTTPException(status_code=400, detail="Username sudah dipakai")
 
     hashed_password = auth.get_password_hash(payload.password)
     now = iso_utc(datetime.now(timezone.utc))
@@ -512,6 +534,7 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
         db.add(
             models.User(
                 name=name,
+                username=username,
                 email=email,
                 role="Creator",
                 job_title=job_title,
@@ -522,7 +545,11 @@ def register(payload: schemas.UserRegister, db: Session = Depends(get_db)):
         )
         db.commit()
     except IntegrityError:
+        # Kalah balapan dengan pendaftaran lain yang memakai username/email
+        # yang sama. Rollback juga membatalkan used_at undangan ini.
         db.rollback()
+        if username_taken(db, username):
+            raise HTTPException(status_code=400, detail="Username sudah dipakai")
         raise HTTPException(status_code=400, detail="Email sudah terdaftar!")
 
     return {"message": "Pendaftaran diterima. Tunggu persetujuan admin."}
@@ -539,6 +566,7 @@ def serialize_user(u) -> dict:
     return {
         "id": u.id,
         "name": u.name,
+        "username": u.username,
         "email": u.email,
         "role": u.role,
         "job_title": u.job_title,
@@ -570,6 +598,7 @@ def get_users(
         db.query(
             models.User.id,
             models.User.name,
+            models.User.username,
             models.User.email,
             models.User.role,
             models.User.job_title,
