@@ -1,4 +1,17 @@
-"""Pendapatan kreator, payout, dan pengaturan (docs/payout-v2.2.md)."""
+"""Pendapatan kreator, payout, dan pengaturan (docs/payout-v2.2.md).
+
+Checklist §6 spek:
+- rumus 100 → 80 → 76 → 22,8 dan saldo setelah payout:
+  test_money_chain_gross_net80_net_share, test_outstanding_decreases_after_payout
+- POST /payouts melebihi saldo / tanpa metode / non-admin:
+  test_create_payout_rejections, test_settings_and_payout_endpoints_require_admin
+- PUT /me/payout per metode & GET /me/payout termask: test_me_payout_validation_per_method
+- /creator-dashboard/ tanpa key gross/net/net80/split/price:
+  test_creator_dashboard_never_leaks_internal_money
+- PUT /settings validasi & fee langsung mengubah creator_summary:
+  test_settings_get_put_and_validation, test_fee_change_updates_creator_summary,
+  test_fee_setting_changes_summary
+"""
 import json
 
 import pytest
@@ -502,3 +515,29 @@ def test_creator_dashboard_never_leaks_internal_money(client, admin_headers):
     assert data["payouts"][0]["note"] == "x"
     assert data["grafik_harian"] == [{"date": "2026-10-05", "content_name": "Royal Mansion", "quantity": 10}]
     assert client.get("/creator-dashboard/", headers=admin_headers).status_code == 403
+
+
+def test_creator_payout_history_hides_snapshot_and_admin_fields(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    client.post("/payouts", json={"user_id": creator_id, "amount_usd": 5}, headers=admin_headers)
+
+    [payout] = client.get("/creator-dashboard/", headers=login(client)).json()["payouts"]
+    assert set(payout) == {"id", "paid_at", "amount_usd", "idr_rate", "amount_idr", "method", "note"}
+    assert BANK["account_number"] not in str(payout)
+
+
+def test_payout_idr_snapshot_survives_rate_change(client, admin_headers):
+    creator_id = seed_creator(method="ewallet", details={"provider": "OVO", "phone": "081234567890", "account_name": "K"})
+    client.post("/payouts", json={"user_id": creator_id, "amount_usd": 10}, headers=admin_headers)
+    client.put("/settings", json={"paypal_fee_pct": 5, "idr_rate": 17000}, headers=admin_headers)
+
+    data = client.get(f"/users/{creator_id}/earnings", headers=admin_headers).json()
+    assert (data["payouts"][0]["idr_rate"], data["payouts"][0]["amount_idr"]) == (16500.0, 165000.0)
+    assert data["idr_rate"] == 17000.0
+    assert data["outstanding_idr"] == 217600.0  # 12,8 × 17.000
+
+
+def test_settings_reject_non_numeric(client, admin_headers):
+    body = {"paypal_fee_pct": "lima", "idr_rate": 16500}
+    assert client.put("/settings", json=body, headers=admin_headers).status_code == 422
+    assert client.get("/settings", headers=admin_headers).json()["paypal_fee_pct"] == 5.0
