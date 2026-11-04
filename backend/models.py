@@ -45,11 +45,22 @@ class User(Base):
 
     password = Column(String, nullable=False)
 
+    # Tidak dipakai lagi sejak payout v2.2 (saldo dihitung di earnings.py).
+    # Kolom dibiarkan ada; jangan ditulis/dibaca.
     wallet_balance = Column(
         Float,
         default=0.0,
         nullable=False,
     )
+
+    # paypal | bank | ewallet (NULL = belum diisi kreator)
+    payout_method = Column(String, nullable=True)
+
+    # JSON, isinya tergantung payout_method:
+    #   paypal  {"paypal_email"}
+    #   bank    {"bank_name", "account_number", "account_name"}
+    #   ewallet {"provider", "phone", "account_name"}
+    payout_details = Column(String, nullable=True)
 
     # Pending | Active | Inactive. Kreator baru mendaftar sebagai Pending dan
     # baru bisa login setelah disetujui admin.
@@ -238,6 +249,8 @@ class CreatorSplit(Base):
 # EARNING HISTORY
 # ============================================================
 
+# Tidak dipakai lagi sejak payout v2.2 (diganti tabel payouts). Tabel
+# dibiarkan ada; jangan ditulis/dibaca.
 class EarningHistory(Base):
     __tablename__ = "earning_history"
 
@@ -352,6 +365,23 @@ class DailySales(Base):
         default=0,
     )
 
+    # Dari Pathway per hari: field `gross` (harga × unit) dan field `creator`
+    # (80% gross, yang diterima Squareclouds dari Pathway). 0 untuk baris
+    # lama yang belum disinkron ulang; earnings.py memakai fallback harga.
+    gross_usd = Column(
+        Float,
+        nullable=False,
+        default=0.0,
+        server_default="0",
+    )
+
+    net80_usd = Column(
+        Float,
+        nullable=False,
+        default=0.0,
+        server_default="0",
+    )
+
     # Relationship
     content = relationship(
         "Content",
@@ -366,6 +396,75 @@ class DailySales(Base):
             name="uq_daily_sales_content_date",
         ),
     )
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+# Nilai awal (di-seed scripts/migrate_payouts.py, juga fallback di
+# earnings.py kalau barisnya belum ada).
+SETTING_DEFAULTS = {
+    "paypal_fee_pct": "5",   # fee PayPal saat Pathway membayar Squareclouds
+    "idr_rate": "16500",     # kurs Rp per USD untuk payout non-PayPal
+}
+
+
+class Setting(Base):
+    __tablename__ = "settings"
+
+    key = Column(String, primary_key=True)
+
+    value = Column(String, nullable=False)
+
+    # ISO timestamp UTC
+    updated_at = Column(String, nullable=True)
+
+
+# ============================================================
+# PAYOUT
+# ============================================================
+
+class Payout(Base):
+    __tablename__ = "payouts"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True,
+    )
+
+    amount_usd = Column(Float, nullable=False)
+
+    # Snapshot kurs saat dibayar
+    idr_rate = Column(Float, nullable=True)
+
+    # Hanya untuk payout non-PayPal
+    amount_idr = Column(Float, nullable=True)
+
+    # paypal | bank | ewallet, snapshot saat dibayar
+    method = Column(String, nullable=False)
+
+    # JSON snapshot users.payout_details saat dibayar
+    details = Column(String, nullable=False)
+
+    note = Column(String, nullable=True)
+
+    # YYYY-MM-DD
+    paid_at = Column(String, nullable=False)
+
+    # Admin yang mencatat
+    created_by = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+
+    # ISO timestamp UTC
+    created_at = Column(String, nullable=False)
 
 
 # ============================================================
