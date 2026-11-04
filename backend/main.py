@@ -340,26 +340,26 @@ def send_invitation_email(email: str, token: str) -> bool:
     link = f"{portal_url}/register?token={token}"
     text = (
         "Halo,\n\n"
-        "Anda diundang bergabung ke Creator Portal SquareClouds. "
+        "Anda diundang bergabung ke Creator Portal Squareclouds Studio. "
         "Buka link berikut untuk membuat akun:\n\n"
         f"{link}\n\n"
         f"Link ini berlaku {INVITATION_VALID_DAYS} hari. Setelah mendaftar, "
         "akun Anda bisa dipakai begitu disetujui admin.\n\n"
-        "Salam,\nSquareClouds"
+        "Salam,\nSquareclouds Studio"
     )
     html = f"""\
 <div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937;line-height:1.6">
   <p>Halo,</p>
-  <p>Anda diundang bergabung ke <b>Creator Portal SquareClouds</b>.
+  <p>Anda diundang bergabung ke <b>Creator Portal Squareclouds Studio</b>.
      Klik tombol di bawah untuk membuat akun.</p>
   <p><a href="{escape(link)}" style="display:inline-block;padding:10px 20px;border-radius:8px;
      background:#2563eb;color:#ffffff;text-decoration:none;font-weight:bold">Buat akun</a></p>
   <p style="font-size:12px;color:#6b7280">Atau buka link ini: {escape(link)}</p>
   <p>Link ini berlaku {INVITATION_VALID_DAYS} hari. Setelah mendaftar,
      akun Anda bisa dipakai begitu disetujui admin.</p>
-  <p>Salam,<br>SquareClouds</p>
+  <p>Salam,<br>Squareclouds Studio</p>
 </div>"""
-    return mailer.send_mail(email, "Undangan Creator Portal SquareClouds", html, text)
+    return mailer.send_mail(email, "Undangan Creator Portal Squareclouds Studio", html, text)
 
 
 @app.post("/invitations", status_code=status.HTTP_201_CREATED)

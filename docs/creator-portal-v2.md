@@ -55,14 +55,14 @@ Catat di docstring bahwa skrip ini harus dijalankan di server sebelum deploy ver
 
 Pengiriman email: buat `backend/mailer.py` dengan fungsi `send_mail(to, subject, html, text)` memakai
 `smtplib` + STARTTLS, konfigurasi dari `.env`: `SMTP_HOST, SMTP_PORT (default 587), SMTP_USER, SMTP_PASS,
-MAIL_FROM (contoh: "SquareClouds <contact@squarecloudsmc.com>"), PORTAL_URL (default https://creator.squarecloudsmc.com)`.
+MAIL_FROM (contoh: "Squareclouds Studio <contact@squarecloudsmc.com>"), PORTAL_URL (default https://creator.squarecloudsmc.com)`.
 Jika `SMTP_HOST` kosong: jangan error, cukup `print` isi email ke log dan kembalikan `False` (mode dev).
 Tambahkan contoh variabel ini ke `backend/.env.example` (buat file itu, tanpa nilai rahasia).
 
 - `POST /invitations` (admin). Body `{"email"}`.
   - Validasi email; tolak jika email sudah terdaftar di `users`. Jika sudah ada undangan aktif (belum `used_at`,
     belum kedaluwarsa) untuk email itu, **kirim ulang** dengan token baru dan hapus yang lama.
-  - Buat `Invitation`, kirim email: subjek "Undangan Creator Portal SquareClouds", isi singkat dalam Bahasa
+  - Buat `Invitation`, kirim email: subjek "Undangan Creator Portal Squareclouds Studio", isi singkat dalam Bahasa
     Indonesia dengan tombol/link `{PORTAL_URL}/register?token={token}` dan catatan berlaku 7 hari.
   - Respons 201 `{"message": "Undangan terkirim ke ...", "sent": true|false}`.
 - `GET /invitations` (admin): daftar undangan yang belum dipakai: `email, created_at, expires_at, expired (bool)`.
@@ -115,7 +115,7 @@ Aturan umum: semua panggilan API lewat `apiUrl()` dari `lib/api.ts` (hapus URL h
 - Baca `token` dari query string. Saat dimuat, panggil `GET /register/{token}`:
   - gagal → tampilkan `detail` dari server (tidak ada form, hanya pesan + link ke `/login`);
   - sukses → tampilkan email (read-only) dan form: Nama, Password (+ konfirmasi), Job title (select). Tombol "Buat akun".
-- Tanpa `token` di URL → tampilkan "Pendaftaran hanya lewat undangan. Hubungi admin SquareClouds."
+- Tanpa `token` di URL → tampilkan "Pendaftaran hanya lewat undangan. Hubungi admin Squareclouds Studio."
 - Sukses → pesan dari server + link ke `/login`. Gagal → `detail` dari server.
 - **Tidak ada** tautan "Daftar" di halaman login.
 - Gaya mengikuti halaman login yang ada.
@@ -147,7 +147,7 @@ Susunan tab/bagian:
 3. **Konten** — tabel read-only dari Pathway: nama, badge status (`Published` hijau, `Pending Release`/`Submissions`
    kuning, `In Development`/`Review` abu), pack type, tier, harga, tanggal rilis, total unit, dan daftar kreator
    tertaut (nama + %). Tombol **Atur split** per baris → modal: daftar kreator Active dengan checkbox + input %,
-   total kreator ≤ 80% (sisanya SquareClouds), simpan via `PUT /contents/{id}/splits`.
+   total kreator ≤ 80% (sisanya Squareclouds Studio), simpan via `PUT /contents/{id}/splits`.
    Tulis keterangan kecil: "Data konten disinkronkan otomatis dari Pathway setiap hari."
 4. **Laporan** — bagian yang sudah ada, tidak diubah selain pemakaian `apiUrl()`/`authHeaders()`.
 

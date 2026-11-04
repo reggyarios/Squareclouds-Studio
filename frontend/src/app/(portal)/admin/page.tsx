@@ -974,7 +974,7 @@ export default function AdminDashboard() {
                 </span>
               </div>
               <div className="flex justify-between font-bold">
-                <span className="text-gray-600">SquareClouds</span>
+                <span className="text-gray-600">Squareclouds</span>
                 <span className="text-blue-600">{roundPct(100 - splitTotal)}%</span>
               </div>
               {overLimit && (

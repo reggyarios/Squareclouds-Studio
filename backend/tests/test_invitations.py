@@ -48,7 +48,7 @@ def test_valid_token_registers_pending_creator(client, admin_headers, outbox):
     assert len(outbox) == 1
     mail = outbox[0]
     assert mail["to"] == "new.creator@example.com"
-    assert mail["subject"] == "Undangan Creator Portal SquareClouds"
+    assert mail["subject"] == "Undangan Creator Portal Squareclouds Studio"
     token = token_from(mail)
     assert f"https://creator.squarecloudsmc.com/register?token={token}" in mail["text"]
 

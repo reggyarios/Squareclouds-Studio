@@ -1,4 +1,4 @@
-"""Bot sinkronisasi Pathway Creators -> database SquareClouds.
+"""Bot sinkronisasi Pathway Creators -> database Squareclouds.
 
 Apa yang dilakukan (sekali jalan, lalu selesai):
   1. Login ke creators.pathway.studio dengan PATHWAY_USERNAME / PATHWAY_PASSWORD (.env).

@@ -135,7 +135,7 @@ function RegisterForm() {
 
   if (!token) {
     return (
-      <Notice tone="info">Pendaftaran hanya lewat undangan. Hubungi admin SquareClouds.</Notice>
+      <Notice tone="info">Pendaftaran hanya lewat undangan. Hubungi admin Squareclouds Studio.</Notice>
     );
   }
   if (success) return <Notice tone="success">{success}</Notice>;
