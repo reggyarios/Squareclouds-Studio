@@ -59,11 +59,27 @@ Semua pembulatan ke 2 desimal hanya saat output.
 
 Admin (`require_admin`):
 - `GET /settings` → `{paypal_fee_pct, idr_rate}`; `PUT /settings` body sama, validasi `0 ≤ fee ≤ 100`, `rate > 0`.
-- `GET /users/{id}/earnings` → `creator_summary(include_internal=True)` + `payout_method` + `payout_details` **penuh** (admin perlu untuk membayar).
-- `POST /payouts` body `{user_id, amount_usd, note?, paid_at?}`: user harus kreator Active; `0 < amount_usd ≤ outstanding_usd`;
-  snapshot `method/details/idr_rate/amount_idr` dari keadaan saat itu (amount_idr hanya jika method ≠ paypal); `created_by` = admin.
-  Tolak 400 jika kreator belum mengisi metode payout.
-- `DELETE /payouts/{id}` (koreksi salah input).
+- `GET /users/{id}/earnings` → `creator_summary(include_internal=True)` + `months` + `payout_method` + `payout_details` **penuh**
+  (admin perlu untuk membayar).
+  `months` = `earnings.creator_months(db, user)`: dari bulan pertama kreator punya share > 0 sampai **bulan lengkap terakhir**,
+  urut lama → baru (bulan kosong di antaranya ikut dengan share 0). Tiap item
+  `{month, units, share_usd, share_idr, paid, payout_id}`; `share_idr = share_usd × idr_rate` saat ini, `None` untuk PayPal/belum diisi.
+  Bulan lengkap terakhir = bulan sebelum bulan dari tanggal terakhir di **seluruh** `daily_sales` (data terakhir 2026-11-05 → 2026-10).
+  Bulan berjalan tidak pernah ditawarkan.
+- `POST /payouts` body `{user_id, period_month, note?, paid_at?}`, **satu payout per kreator per bulan**:
+  - Kolom `payouts.period_month String NULL` (YYYY-MM) + unique index `uq_payouts_user_period (user_id, period_month)`, lewat
+    `migrate_payouts.py` (aman diulang). Payout lama tetap NULL: tanpa periode, tidak menandai bulan mana pun sebagai dibayar.
+  - `amount_usd` = `share_usd` dan `amount_idr` = `share_idr` bulan itu dari `creator_months`, **dihitung server**. Tidak ada input
+    jumlah: field lain di body (termasuk `amount_usd`) ditolak 422.
+  - Tolak 400: periode bukan YYYY-MM; bulan belum lengkap (bulan berjalan/depan); tidak ada pendapatan (share 0 atau di luar rentang);
+    sudah dibayar (juga lewat unique index kalau dua pencatatan bersamaan).
+  - Tetap: user harus kreator Active; tolak 400 jika kreator belum mengisi metode payout; jumlah ≤ `outstanding_usd` (bisa kena kalau
+    masih ada payout lama tanpa periode); snapshot `method/details/idr_rate` dari keadaan saat itu; `created_by` = admin.
+  - `outstanding_usd` tetap = total share − total dibayar (termasuk payout lama dan bulan berjalan).
+- `DELETE /payouts/{id}` (koreksi salah input; bulannya bisa dicatat ulang).
+- Email payout ke kreator: baris **Periode** (mis. "Oktober 2026") di atas Jumlah; payout lama tanpa periode tidak punya baris itu.
+  Rupiah memakai `earnings.format_idr` (§5 Format angka).
+- Riwayat payout (admin & kreator) menyertakan `period_month`.
 - `GET /admin-reports/`: ganti perhitungan lama (`price × unit`) dengan `admin_overview`; tambahkan `net_usd`, `creators_share_usd`,
   `squareclouds_share_usd` per konten & per bulan. Bentuk respons lama yang dipakai tab Laporan boleh diubah, sesuaikan frontend-nya.
 
@@ -82,15 +98,24 @@ Kreator (`app/(portal)/creator/page.tsx`):
   "Payout bank/e-wallet dikonversi dengan kurs Rp{idr_rate}/$ yang ditetapkan Squareclouds Studio."
 - Tabel **Per konten**: nama, status, unit terjual, **pendapatan saya**. Tidak ada kolom harga/gross/net/split.
 - Tabel **Per bulan**: bulan, unit terjual, pendapatan saya.
-- Tabel **Riwayat payout**: tanggal, jumlah USD, (IDR & kurs bila ada), metode, catatan.
+- Tabel **Riwayat payout**: periode, tanggal, jumlah USD, (IDR & kurs bila ada), metode, catatan.
 
 Admin (`app/(portal)/admin/page.tsx`):
 - Tab baru **Pengaturan**: dua input (fee PayPal %, kurs IDR) + Simpan.
 - Tab **Kreator**: tombol **Pendapatan & Payout** per baris → panel/modal berisi ringkasan, data payout **penuh**, form
-  **Catat pembayaran** (jumlah USD default = saldo tertunda, catatan, tanggal), riwayat payout dengan tombol hapus (konfirmasi).
-  Tampilkan peringatan jika kreator belum mengisi metode payout.
+  **Catat pembayaran**, riwayat payout dengan tombol hapus (konfirmasi). Tampilkan peringatan jika kreator belum mengisi metode payout.
+  - Form: dropdown **Periode** berisi bulan dari `months` yang belum dibayar (dan share > 0), label
+    "Oktober 2026 — $123.45 (≈ Rp2.036.925,00)" (bagian rupiah hanya non-PayPal), default bulan tertua. Di bawah dropdown: ringkasan
+    nominal yang akan dicatat (USD, plus IDR & kurs jika non-PayPal). **Tidak ada input jumlah.** Tanggal bayar & catatan tetap.
+  - Bulan yang sudah dibayar tidak ada di dropdown; tampil di riwayat payout, yang punya kolom **Periode** (payout lama: "-").
 - Tab **Konten**: tambah kolom Gross & Net (all-time).
 - Tab **Laporan**: sesuaikan dengan respons baru; tampilkan baris total: gross, net, bagian kreator, bagian Squareclouds.
+
+Format angka (admin, kreator, email):
+- Rupiah selalu format Indonesia dua desimal: ribuan titik, desimal koma, selalu `,00`, mis. `Rp2.036.925,00`; kurs juga
+  (`Rp16.500,00/$`). Satu helper per sisi: `formatIDR` di `frontend/src/lib/portal.ts`, `format_idr` di `backend/earnings.py`.
+  Jangan memformat rupiah di tempat lain.
+- USD tetap `$1,234.56` (`formatUsd`).
 
 ## 6. Tes (pytest) minimal
 - Rumus: gross 100, fee 5 → net80 80, net 76; split 30 → share 22.8; `outstanding` berkurang setelah payout.
