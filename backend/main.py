@@ -907,12 +907,6 @@ def format_date_id(value: str) -> str:
     return f"{d.day} {MONTHS_ID[d.month - 1]} {d.year}"
 
 
-def format_rupiah(value: float) -> str:
-    """16500 -> "Rp16.500"; pecahan tetap terlihat (16250.5 -> "Rp16.250,5")."""
-    text = f"{value:,.2f}".rstrip("0").rstrip(".")
-    return "Rp" + text.replace(",", "_").replace(".", ",").replace("_", ".")
-
-
 def payout_destination_text(method: str, details: dict | None) -> str:
     """Tujuan payout termask, mis. "Transfer bank BCA ****1234"."""
     details = details or {}
@@ -931,7 +925,7 @@ def send_payout_email(user: models.User, payout: models.Payout) -> bool:
     amount = f"${payout.amount_usd:,.2f}"
     # Rupiah dari snapshot payout (dihitung earnings.to_idr saat dicatat).
     idr = (
-        f"≈ {format_rupiah(payout.amount_idr)} (kurs {format_rupiah(payout.idr_rate)}/$)"
+        f"≈ {earnings.format_idr(payout.amount_idr)} (kurs {earnings.format_idr(payout.idr_rate)}/$)"
         if payout.method != "paypal" and payout.amount_idr is not None and payout.idr_rate
         else None
     )

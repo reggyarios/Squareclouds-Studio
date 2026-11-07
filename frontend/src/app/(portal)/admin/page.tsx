@@ -9,7 +9,7 @@ import {
   PAYOUT_FIELD_LABEL,
   PAYOUT_METHOD_LABEL,
   type PayoutMethod,
-  formatIdr,
+  formatIDR,
   formatMonth,
   formatUsd,
 } from "@/lib/portal";
@@ -1304,7 +1304,7 @@ export default function AdminDashboard() {
                       <p className="text-xs font-bold uppercase text-gray-400">{label}</p>
                       <p className="text-2xl font-black text-gray-900">{formatUsd(usd)}</p>
                       {idr !== null && (
-                        <p className="text-xs font-bold text-gray-500">≈ {formatIdr(idr)}</p>
+                        <p className="text-xs font-bold text-gray-500">≈ {formatIDR(idr)}</p>
                       )}
                     </div>
                   ))}
@@ -1437,7 +1437,7 @@ export default function AdminDashboard() {
                   </div>
                   <p className="text-xs text-gray-500">
                     Default jumlah = saldo tertunda. Payout bank/e-wallet dicatat juga dalam rupiah
-                    dengan kurs {formatIdr(earningsData.idr_rate)}/$.
+                    dengan kurs {formatIDR(earningsData.idr_rate)}/$.
                   </p>
                   {payoutPesan.text && (
                     <div
@@ -1491,10 +1491,10 @@ export default function AdminDashboard() {
                               <td className="px-4 py-2 text-right whitespace-nowrap">
                                 {p.amount_idr !== null ? (
                                   <>
-                                    {formatIdr(p.amount_idr)}
+                                    {formatIDR(p.amount_idr)}
                                     {p.idr_rate !== null && (
                                       <span className="block text-xs text-gray-400">
-                                        kurs {formatIdr(p.idr_rate)}/$
+                                        kurs {formatIDR(p.idr_rate)}/$
                                       </span>
                                     )}
                                   </>

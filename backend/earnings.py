@@ -45,6 +45,18 @@ def to_idr(usd: float, rate: float) -> float:
     return usd * rate
 
 
+def format_idr(value: float) -> str:
+    """Rupiah format Indonesia, selalu 2 desimal: 2036925 -> "Rp2.036.925,00".
+
+    Satu-satunya pemformat rupiah backend (email, pesan); sama dengan
+    formatIDR di frontend/src/lib/portal.ts.
+    """
+    text = f"{abs(value):,.2f}"
+    # Tanpa tanda minus kalau nilainya jadi 0,00 setelah dibulatkan.
+    sign = "-" if value < 0 and text.strip("0.,") else ""
+    return sign + "Rp" + text.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
 # ============================================================================
 # SETTINGS
 # ============================================================================

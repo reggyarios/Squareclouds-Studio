@@ -251,6 +251,16 @@ def test_admin_overview_splits_net_between_creators_and_squareclouds(client):
         assert [m["month"] for m in only_september["by_month"]] == ["2026-09"]
 
 
+def test_format_idr_always_two_decimals():
+    assert earnings.format_idr(2036925) == "Rp2.036.925,00"
+    assert earnings.format_idr(16500) == "Rp16.500,00"
+    assert earnings.format_idr(16250.5) == "Rp16.250,50"
+    assert earnings.format_idr(999.999) == "Rp1.000,00"
+    assert earnings.format_idr(0) == "Rp0,00"
+    assert earnings.format_idr(-0.001) == "Rp0,00"
+    assert earnings.format_idr(-1234.5) == "-Rp1.234,50"
+
+
 # ============================================================================
 # ENDPOINT ADMIN
 # ============================================================================
@@ -585,7 +595,7 @@ def test_payout_sends_email_to_creator(client, admin_headers, outbox, monkeypatc
     for part in (
         "Halo Kreator,",
         "$10.00",
-        "≈ Rp165.000 (kurs Rp16.500/$)",
+        "≈ Rp165.000,00 (kurs Rp16.500,00/$)",
         "Transfer bank BCA ****7890",
         "3 November 2026",
         "Payout <Oktober>",
@@ -613,7 +623,7 @@ def test_payout_email_for_paypal_and_ewallet(client, admin_headers, outbox):
         db.commit()
     client.post("/payouts", json={"user_id": creator_id, "amount_usd": 1}, headers=admin_headers)
     assert "DANA ****5678" in outbox[-1]["text"]
-    assert "≈ Rp16.500 (kurs Rp16.500/$)" in outbox[-1]["text"]
+    assert "≈ Rp16.500,00 (kurs Rp16.500,00/$)" in outbox[-1]["text"]
 
 
 def test_payout_saved_when_email_fails(client, admin_headers, monkeypatch):

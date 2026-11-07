@@ -20,7 +20,7 @@ import {
   PAYOUT_FIELD_LABEL,
   PAYOUT_METHOD_LABEL,
   type PayoutMethod,
-  formatIdr,
+  formatIDR,
   formatMonth,
   formatUsd,
 } from "@/lib/portal";
@@ -324,7 +324,7 @@ export default function CreatorDashboard() {
                   <p
                     className={`mt-1 text-sm font-bold ${highlight ? "text-blue-50" : "text-gray-500"}`}
                   >
-                    ≈ {formatIdr(card.idr)}
+                    ≈ {formatIDR(card.idr)}
                   </p>
                 )}
                 <p
@@ -465,7 +465,7 @@ export default function CreatorDashboard() {
             )}
 
             <p className="mt-4 text-xs font-medium text-gray-400">
-              Payout bank/e-wallet dikonversi dengan kurs {formatIdr(data.idr_rate)}/$ yang
+              Payout bank/e-wallet dikonversi dengan kurs {formatIDR(data.idr_rate)}/$ yang
               ditetapkan Squareclouds Studio.
             </p>
           </div>
@@ -706,10 +706,10 @@ export default function CreatorDashboard() {
                       <td className="px-4 md:px-8 py-4 text-sm text-gray-700 text-right whitespace-nowrap">
                         {p.amount_idr !== null ? (
                           <>
-                            <span className="font-bold">{formatIdr(p.amount_idr)}</span>
+                            <span className="font-bold">{formatIDR(p.amount_idr)}</span>
                             {p.idr_rate !== null && (
                               <span className="block text-xs text-gray-400">
-                                kurs {formatIdr(p.idr_rate)}/$
+                                kurs {formatIDR(p.idr_rate)}/$
                               </span>
                             )}
                           </>

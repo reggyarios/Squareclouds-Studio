@@ -35,8 +35,16 @@ export const MASKED_PAYOUT_FIELDS = ["paypal_email", "account_number", "phone"];
 // Format tampilan saja; semua angka uang dihitung di backend/earnings.py.
 export const formatUsd = (n: number) =>
   `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-export const formatIdr = (n: number) =>
-  `Rp${n.toLocaleString("id-ID", { maximumFractionDigits: 0 })}`;
+// Rupiah format Indonesia, selalu 2 desimal: 2036925 -> "Rp2.036.925,00".
+// Satu-satunya pemformat rupiah frontend; sama dengan format_idr di
+// backend/earnings.py. Disusun manual (bukan toLocaleString) supaya hasilnya
+// tidak tergantung data locale browser/Node.
+export const formatIDR = (n: number) => {
+  const [int, dec] = Math.abs(n).toFixed(2).split(".");
+  // Tanpa tanda minus kalau nilainya jadi 0,00 setelah dibulatkan.
+  const sign = n < 0 && /[1-9]/.test(int + dec) ? "-" : "";
+  return `${sign}Rp${int.replace(/\B(?=(\d{3})+(?!\d))/g, ".")},${dec}`;
+};
 export const formatMonth = (month: string) => {
   const [year, m] = month.split("-").map(Number);
   return year && m
