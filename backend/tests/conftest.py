@@ -69,8 +69,8 @@ def outbox(monkeypatch):
     """Ganti mailer.send_mail: email ditampung di list, dianggap terkirim."""
     sent = []
 
-    def fake_send_mail(to, subject, html, text):
-        sent.append({"to": to, "subject": subject, "html": html, "text": text})
+    def fake_send_mail(to, subject, html, text, attachments=None):
+        sent.append({"to": to, "subject": subject, "html": html, "text": text, "attachments": attachments or []})
         return True
 
     monkeypatch.setattr(mailer, "send_mail", fake_send_mail)

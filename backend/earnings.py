@@ -92,6 +92,11 @@ def get_setting_float(db: Session, key: str, default) -> float:
         return float(default)
 
 
+def get_setting_str(db: Session, key: str) -> str:
+    row = db.get(models.Setting, key)
+    return row.value if row is not None else models.SETTING_DEFAULTS[key]
+
+
 def set_setting(db: Session, key: str, value) -> None:
     """Simpan nilai setting tanpa commit; pemanggil yang commit."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -109,6 +114,11 @@ def paypal_fee_pct(db: Session) -> float:
 
 def idr_rate(db: Session) -> float:
     return get_setting_float(db, "idr_rate", models.SETTING_DEFAULTS["idr_rate"])
+
+
+def company_address(db: Session) -> str:
+    """Alamat pengirim di slip payout (beberapa baris, dipisah newline)."""
+    return get_setting_str(db, "company_address")
 
 
 # ============================================================================

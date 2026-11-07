@@ -398,6 +398,12 @@ class DailySales(Base):
 SETTING_DEFAULTS = {
     "paypal_fee_pct": "5",   # fee PayPal saat Pathway membayar Squareclouds
     "idr_rate": "16500",     # kurs Rp per USD untuk payout non-PayPal
+    # Alamat pengirim di slip payout PDF, satu baris per baris alamat.
+    "company_address": (
+        "Jalan Halat, Gang Merdeka No.12\n"
+        "Kecamatan Medan Area, Kota Medan\n"
+        "Sumatera Utara 20216"
+    ),
 }
 
 

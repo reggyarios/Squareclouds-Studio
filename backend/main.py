@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Response, status, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +24,7 @@ import schemas
 import auth
 import earnings
 import mailer
+import payout_slip
 from utils.file_storage import delete_upload, extract_upload_path
 
 
@@ -115,6 +116,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Supaya frontend bisa membaca nama file slip PDF saat mengunduh.
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -837,7 +840,12 @@ def current_settings(db: Session) -> dict:
     return {
         "paypal_fee_pct": earnings.paypal_fee_pct(db),
         "idr_rate": earnings.idr_rate(db),
+        "company_address": earnings.company_address(db),
     }
+
+
+MAX_COMPANY_ADDRESS_LINES = 5
+MAX_COMPANY_ADDRESS_LENGTH = 300
 
 
 @app.get("/settings")
@@ -863,8 +871,24 @@ def update_settings(
     if not (math.isfinite(rate) and rate > 0):
         raise HTTPException(status_code=400, detail="Kurs IDR harus lebih dari 0.")
 
+    address = None
+    if payload.company_address is not None:
+        # Spasi di tepi tiap baris dan baris kosong dibuang.
+        lines = [line.strip() for line in payload.company_address.splitlines() if line.strip()]
+        address = "\n".join(lines)
+        if not lines:
+            raise HTTPException(status_code=400, detail="Alamat perusahaan wajib diisi.")
+        if len(lines) > MAX_COMPANY_ADDRESS_LINES or len(address) > MAX_COMPANY_ADDRESS_LENGTH:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Alamat perusahaan maksimal {MAX_COMPANY_ADDRESS_LINES} baris "
+                f"dan {MAX_COMPANY_ADDRESS_LENGTH} karakter.",
+            )
+
     earnings.set_setting(db, "paypal_fee_pct", fee)
     earnings.set_setting(db, "idr_rate", rate)
+    if address is not None:
+        earnings.set_setting(db, "company_address", address)
     db.commit()
     return {"message": "Pengaturan disimpan.", "data": current_settings(db)}
 
@@ -933,12 +957,103 @@ def payout_destination_text(method: str, details: dict | None) -> str:
     return method
 
 
-def send_payout_email(user: models.User, payout: models.Payout) -> bool:
-    amount = f"${payout.amount_usd:,.2f}"
+def format_count(value: int) -> str:
+    """6396 -> "6.396" (pemisah ribuan Indonesia, sama dengan toLocaleString id-ID)."""
+    return f"{value:,}".replace(",", ".")
+
+
+def payout_shows_idr(payout: models.Payout) -> bool:
+    """Rupiah hanya untuk payout non-PayPal yang punya snapshot kurs."""
+    return payout.method != "paypal" and payout.amount_idr is not None and bool(payout.idr_rate)
+
+
+# ----------------------------------------------------------------------------
+# Slip payout PDF (payout_slip.py hanya tata letak; data disiapkan di sini)
+# ----------------------------------------------------------------------------
+
+SLIP_SENDER_NAME = "Squareclouds Studio"
+SLIP_SENDER_EMAIL = "contact@squarecloudsmc.com"
+
+
+def payout_slip_number(payout: models.Payout) -> str:
+    return f"PO-{payout.id:06d}"
+
+
+def payout_slip_filename(user: models.User, payout: models.Payout) -> str:
+    """payout-squareclouds-<username>-<YYYY-MM>.pdf; payout lama tanpa periode
+    memakai nomor slip, akun lama tanpa username memakai user<id>."""
+    who = user.username or f"user{user.id}"
+    return f"payout-squareclouds-{who}-{payout.period_month or payout_slip_number(payout)}.pdf"
+
+
+def payout_slip_pdf(db: Session, user: models.User, payout: models.Payout) -> bytes:
+    # Hanya unit dan bagian kreator; gross/net/fee/split tidak pernah masuk slip.
+    show_idr = payout_shows_idr(payout)
+    items = payout.items
+    return payout_slip.render(payout_slip.SlipData(
+        slip_no=payout_slip_number(payout),
+        created_on=format_date_id(payout.paid_at),
+        revenue_month=format_month_id(payout.period_month) if payout.period_month else "-",
+        sender=[SLIP_SENDER_NAME, SLIP_SENDER_EMAIL, *earnings.company_address(db).splitlines()],
+        recipient=[
+            user.name,
+            f"@{user.username} – Squareclouds Studio Creator" if user.username else "Squareclouds Studio Creator",
+            user.email,
+            payout_destination_text(payout.method, earnings.load_details(payout.details)),
+        ],
+        items=[(i.content_name, format_count(i.units), earnings.format_usd(i.share_usd)) for i in items],
+        total_units=format_count(sum(i.units for i in items)) if items else None,
+        total_usd=earnings.format_usd(payout.amount_usd),
+        exchange_rate=f"{earnings.format_idr(payout.idr_rate)}/$" if show_idr else None,
+        total_idr=earnings.format_idr(payout.amount_idr) if show_idr else None,
+        note=payout.note,
+        footer=(
+            "This slip is generated automatically by Creator Portal Squareclouds Studio · "
+            + portal_url().split("://", 1)[-1]
+        ),
+    ))
+
+
+def payout_items_email(payout: models.Payout) -> tuple[str, str]:
+    """Tabel ringkas per konten (teks, HTML) untuk email payout; kosong untuk
+    payout lama tanpa rincian."""
+    items = payout.items
+    if not items:
+        return "", ""
+    rows = [(i.content_name, f"{format_count(i.units)} unit", earnings.format_usd(i.share_usd)) for i in items]
+    total = ("Total", f"{format_count(sum(i.units for i in items))} unit", earnings.format_usd(payout.amount_usd))
+    widths = [max(len(row[col]) for row in rows + [total]) for col in range(3)]
+    text = "Rincian per konten:\n" + "\n".join(
+        f"  {name:<{widths[0]}}  {units:>{widths[1]}}  {usd:>{widths[2]}}" for name, units, usd in rows + [total]
+    )
+
+    cell = "padding:4px 16px 4px 0"
+    head = f'{cell};color:#6b7280;font-weight:normal;border-bottom:1px solid #e5e7eb'
+    foot = f"{cell};font-weight:bold;border-top:1px solid #e5e7eb"
+    html_rows = "".join(
+        f'<tr><td style="{cell}">{escape(name)}</td><td style="{cell};text-align:right">{units}</td>'
+        f'<td style="{cell};text-align:right">{usd}</td></tr>'
+        for name, units, usd in rows
+    )
+    html = (
+        '<p style="margin:16px 0 4px;font-weight:bold">Rincian per konten</p>'
+        '<table style="border-collapse:collapse;margin:0 0 16px">'
+        f'<tr><th style="{head};text-align:left">Konten</th><th style="{head};text-align:right">Unit</th>'
+        f'<th style="{head};text-align:right">USD</th></tr>'
+        f"{html_rows}"
+        f'<tr><td style="{foot}">Total</td><td style="{foot};text-align:right">{total[1]}</td>'
+        f'<td style="{foot};text-align:right">{total[2]}</td></tr>'
+        "</table>"
+    )
+    return text, html
+
+
+def send_payout_email(db: Session, user: models.User, payout: models.Payout) -> bool:
+    amount = earnings.format_usd(payout.amount_usd)
     # Rupiah dari snapshot payout (dihitung earnings.to_idr saat dicatat).
     idr = (
         f"≈ {earnings.format_idr(payout.amount_idr)} (kurs {earnings.format_idr(payout.idr_rate)}/$)"
-        if payout.method != "paypal" and payout.amount_idr is not None and payout.idr_rate
+        if payout_shows_idr(payout)
         else None
     )
     destination = payout_destination_text(payout.method, earnings.load_details(payout.details))
@@ -951,12 +1066,15 @@ def send_payout_email(user: models.User, payout: models.Payout) -> bool:
         rows.insert(0, ("Periode", format_month_id(payout.period_month)))
     if payout.note:
         rows.append(("Catatan", payout.note))
+    items_text, items_html = payout_items_email(payout)
 
     text = (
         f"Halo {user.name},\n\n"
         "Payout pendapatan Anda dari Squareclouds Studio telah dikirim.\n\n"
         + "\n".join(f"{label:8}: {value}".replace("\n", "\n" + " " * 10) for label, value in rows)
-        + "\n\nLihat rincian pendapatan dan riwayat payout di dashboard:\n"
+        + (f"\n\n{items_text}" if items_text else "")
+        + "\n\nSlip payout (PDF) terlampir.\n\n"
+        "Lihat rincian pendapatan dan riwayat payout di dashboard:\n"
         f"{link}\n\n"
         "Salam,\nSquareclouds Studio"
     )
@@ -970,13 +1088,16 @@ def send_payout_email(user: models.User, payout: models.Payout) -> bool:
   <p>Halo {escape(user.name)},</p>
   <p>Payout pendapatan Anda dari <b>Squareclouds Studio</b> telah dikirim.</p>
   <table style="border-collapse:collapse;margin:8px 0 16px">{html_rows}</table>
+  {items_html}
+  <p>Slip payout (PDF) terlampir.</p>
   <p><a href="{escape(link)}" style="display:inline-block;padding:10px 20px;border-radius:8px;
      background:#2563eb;color:#ffffff;text-decoration:none;font-weight:bold">Buka dashboard</a></p>
   <p style="font-size:12px;color:#6b7280">Atau buka link ini: {escape(link)}</p>
   <p>Salam,<br>Squareclouds Studio</p>
 </div>"""
+    attachment = (payout_slip_filename(user, payout), payout_slip_pdf(db, user, payout), "application/pdf")
     return mailer.send_mail(
-        user.email, f"Payout Squareclouds Studio: {amount} telah dikirim", html, text
+        user.email, f"Payout Squareclouds Studio: {amount} telah dikirim", html, text, attachments=[attachment]
     )
 
 
@@ -988,7 +1109,7 @@ def notify_payout(db: Session, payout: models.Payout) -> bool:
     """
     user = db.get(models.User, payout.user_id)
     try:
-        sent = send_payout_email(user, payout)
+        sent = send_payout_email(db, user, payout)
     except Exception as e:
         print(f"Payout Mail Error (payout {payout.id}): {e}", flush=True)
         return False
@@ -1140,6 +1261,25 @@ def get_payout_detail(
         **earnings.serialize_payout(payout, include_internal=internal),
         "items": earnings.serialize_payout_items(payout, include_internal=internal),
     }
+
+
+@app.get("/payouts/{payout_id}/pdf")
+def download_payout_slip(
+    payout_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    payout = get_payout_or_error(db, payout_id, current_user)
+    user = db.get(models.User, payout.user_id)
+    # Nama file hanya [a-z0-9_-.] (username tervalidasi), aman tanpa quoting lain.
+    return Response(
+        content=payout_slip_pdf(db, user, payout),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{payout_slip_filename(user, payout)}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @app.post("/payouts/{payout_id}/notify")

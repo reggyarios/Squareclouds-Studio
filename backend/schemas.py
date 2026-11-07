@@ -37,6 +37,8 @@ class SplitsReplace(BaseModel):
 class SettingsUpdate(BaseModel):
     paypal_fee_pct: float
     idr_rate: float
+    # Alamat pengirim di slip payout; None = tidak diubah.
+    company_address: Optional[str] = None
 
 class PayoutCreate(BaseModel):
     # Jumlah tidak bisa diisi: amount_usd/amount_idr dihitung server dari

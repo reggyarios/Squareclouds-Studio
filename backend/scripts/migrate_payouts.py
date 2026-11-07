@@ -24,8 +24,9 @@ dibedakan dari "belum disinkron"); `pathway_bot.py --full` mengisinya lagi
 dengan angka Pathway, termasuk 0 yang asli.
 
 Tabel baru:
-    settings    pengaturan admin; di-seed paypal_fee_pct dan idr_rate
-                kalau belum ada (nilai yang sudah ada tidak ditimpa)
+    settings    pengaturan admin; di-seed paypal_fee_pct, idr_rate, dan
+                company_address (alamat di slip payout PDF) kalau belum ada
+                (nilai yang sudah ada tidak ditimpa)
     payouts     riwayat pembayaran ke kreator; kalau tabelnya sudah ada, kolom
                 ini ikut ditambahkan:
                   notified_at    waktu email notifikasi terkirim
@@ -121,6 +122,7 @@ with engine.begin() as conn:
             ),
             {"key": key, "value": value, "now": now},
         ).rowcount
-        print(f"settings.{key:20} {'di-seed ' + value if inserted else 'sudah ada'}")
+        shown = value.replace("\n", " / ")
+        print(f"settings.{key:20} {'di-seed ' + shown if inserted else 'sudah ada'}")
 
 print("\nMigrasi selesai.")

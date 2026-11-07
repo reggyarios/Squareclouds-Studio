@@ -19,16 +19,19 @@ Payout per bulan (§4 POST /payouts):
 - nominal server = share bulan itu, amount_usd di body 422: test_payout_amount_is_computed_by_server
 - format_idr(2036925) == "Rp2.036.925,00": test_format_idr_always_two_decimals
 """
+import io
 import json
 import smtplib
 
 import pytest
+from pypdf import PdfReader
 from sqlalchemy.exc import IntegrityError
 
 import auth
 import earnings
 import mailer
 import models
+import payout_slip
 from database import SessionLocal
 
 CREATOR_PASSWORD = "creator-password"
@@ -412,13 +415,21 @@ def post_payout(client, headers, user_id, period_month="2026-10", **body):
     return client.post("/payouts", json={"user_id": user_id, "period_month": period_month, **body}, headers=headers)
 
 
+DEFAULT_ADDRESS = "Jalan Halat, Gang Merdeka No.12\nKecamatan Medan Area, Kota Medan\nSumatera Utara 20216"
+
+
 def test_settings_get_put_and_validation(client, admin_headers):
-    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 5.0, "idr_rate": 16500.0}
+    def get_settings():
+        return client.get("/settings", headers=admin_headers).json()
+
+    assert get_settings() == {"paypal_fee_pct": 5.0, "idr_rate": 16500.0, "company_address": DEFAULT_ADDRESS}
 
     res = client.put("/settings", json={"paypal_fee_pct": 3.5, "idr_rate": 16250.5}, headers=admin_headers)
     assert res.status_code == 200, res.text
-    assert res.json()["data"] == {"paypal_fee_pct": 3.5, "idr_rate": 16250.5}
-    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 3.5, "idr_rate": 16250.5}
+    # Tanpa company_address: alamat tidak berubah.
+    expected = {"paypal_fee_pct": 3.5, "idr_rate": 16250.5, "company_address": DEFAULT_ADDRESS}
+    assert res.json()["data"] == expected
+    assert get_settings() == expected
 
     for body in (
         {"paypal_fee_pct": -0.1, "idr_rate": 16500},
@@ -428,13 +439,27 @@ def test_settings_get_put_and_validation(client, admin_headers):
     ):
         assert client.put("/settings", json=body, headers=admin_headers).status_code == 400, body
     assert client.put("/settings", json={"paypal_fee_pct": 5}, headers=admin_headers).status_code == 422
-    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 3.5, "idr_rate": 16250.5}
+    assert get_settings() == expected
 
     # Batas 0 dan 100 boleh.
     for fee in (0, 100):
         body = {"paypal_fee_pct": fee, "idr_rate": 1}
         assert client.put("/settings", json=body, headers=admin_headers).status_code == 200
-    assert client.get("/settings", headers=admin_headers).json() == {"paypal_fee_pct": 100.0, "idr_rate": 1.0}
+    assert get_settings() == {"paypal_fee_pct": 100.0, "idr_rate": 1.0, "company_address": DEFAULT_ADDRESS}
+
+
+def test_settings_company_address(client, admin_headers):
+    base = {"paypal_fee_pct": 5, "idr_rate": 16500}
+    body = {**base, "company_address": "  Jl. Baru No. 1 \r\n\n  Medan 20111  \n"}
+    res = client.put("/settings", json=body, headers=admin_headers)
+    assert res.status_code == 200, res.text
+    # Spasi di tepi dan baris kosong dibuang.
+    assert res.json()["data"]["company_address"] == "Jl. Baru No. 1\nMedan 20111"
+
+    for address in ("", "  \n  ", "\n".join(f"Baris {i}" for i in range(6)), "x" * 301):
+        res = client.put("/settings", json={**base, "company_address": address}, headers=admin_headers)
+        assert res.status_code == 400, address
+    assert client.get("/settings", headers=admin_headers).json()["company_address"] == "Jl. Baru No. 1\nMedan 20111"
 
 
 def test_settings_and_payout_endpoints_require_admin(client, admin_headers):
@@ -902,7 +927,7 @@ def get_payout(payout_id):
         return db.get(models.Payout, payout_id)
 
 
-def failing_send_mail(to, subject, html, text):
+def failing_send_mail(to, subject, html, text, attachments=None):
     raise smtplib.SMTPServerDisconnected("SMTP mati")
 
 
@@ -963,7 +988,70 @@ def test_payout_email_without_period_for_legacy_payout(client, admin_headers, ou
         db.commit()
     assert client.post(f"/payouts/{payout_id}/notify", headers=admin_headers).status_code == 200
     assert "Periode" not in outbox[-1]["text"] + outbox[-1]["html"]
+    assert "Rincian per konten" not in outbox[-1]["text"] + outbox[-1]["html"]
     assert "Jumlah  : $5.00" in outbox[-1]["text"]
+    # Slip tetap terlampir, dengan nomor slip di nama file (tanpa periode).
+    [(filename, data, mime_type)] = outbox[-1]["attachments"]
+    assert (filename, mime_type) == (f"payout-squareclouds-kreator-PO-{payout_id:06d}.pdf", "application/pdf")
+    assert data.startswith(b"%PDF")
+
+
+def test_payout_email_attaches_slip_and_lists_contents(client, admin_headers, outbox):
+    creator_id = seed_two_content_creator()
+    assert post_payout(client, admin_headers, creator_id).status_code == 201
+
+    mail = outbox[-1]
+    [(filename, data, mime_type)] = mail["attachments"]
+    assert (filename, mime_type) == ("payout-squareclouds-kreator-2026-10.pdf", "application/pdf")
+    assert "Konten A" in pdf_text(data)
+    assert (
+        "Rincian per konten:\n"
+        "  Konten A  1 unit  $0.29\n"
+        "  Konten B  1 unit  $0.28\n"
+        "  Total     2 unit  $0.57\n"
+    ) in mail["text"]
+    assert "Slip payout (PDF) terlampir." in mail["text"]
+    assert "Rincian per konten" in mail["html"]
+    assert ">Konten A</td>" in mail["html"]
+    assert ">$0.57</td>" in mail["html"]
+
+
+def test_mailer_sends_attachment_as_multipart(monkeypatch):
+    sent = []
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, context):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def send_message(self, msg):
+            sent.append(msg)
+
+    monkeypatch.setenv("SMTP_HOST", "smtp.test")
+    monkeypatch.setenv("SMTP_USER", "")
+    monkeypatch.setattr(mailer.smtplib, "SMTP", FakeSMTP)
+    pdf = b"%PDF-1.4 test"
+    assert mailer.send_mail("a@b.co", "Subjek", "<p>Halo</p>", "Halo", attachments=[("slip.pdf", pdf, "application/pdf")])
+
+    [msg] = sent
+    assert msg.get_content_type() == "multipart/mixed"
+    body = msg.get_body(preferencelist=("html",))
+    assert body.get_content().strip() == "<p>Halo</p>"
+    [attachment] = list(msg.iter_attachments())
+    assert attachment.get_content_type() == "application/pdf"
+    assert attachment.get_filename() == "slip.pdf"
+    assert attachment.get_content() == pdf
 
 
 def test_payout_saved_when_email_fails(client, admin_headers, monkeypatch):
@@ -1006,7 +1094,7 @@ def test_resend_payout_email(client, admin_headers, monkeypatch):
     assert get_payout(payout_id).notified_at is None
 
     sent = []
-    monkeypatch.setattr(mailer, "send_mail", lambda to, subject, html, text: sent.append(subject) or True)
+    monkeypatch.setattr(mailer, "send_mail", lambda to, subject, html, text, attachments=None: sent.append(subject) or True)
     res = client.post(url, headers=admin_headers)
     assert res.status_code == 200, res.text
     assert res.json()["data"]["notified_at"] is not None
@@ -1016,3 +1104,160 @@ def test_resend_payout_email(client, admin_headers, monkeypatch):
     assert client.post(url, headers=admin_headers).status_code == 400
     assert client.post("/payouts/999/notify", headers=admin_headers).status_code == 404
     assert len(sent) == 1
+
+
+# ============================================================================
+# SLIP PAYOUT PDF
+# ============================================================================
+
+# Tidak boleh ada di slip kreator (huruf kecil, dicek sebagai substring).
+FORBIDDEN_SLIP_WORDS = ("gross", "net", "fee", "split", "bagian squareclouds", "squareclouds share")
+
+
+def pdf_pages(content):
+    return [page.extract_text() for page in PdfReader(io.BytesIO(content)).pages]
+
+
+def pdf_text(content):
+    return "\n".join(pdf_pages(content))
+
+
+def assert_no_internal_money(text):
+    leaked = [word for word in FORBIDDEN_SLIP_WORDS if word in text.lower()]
+    assert leaked == [], leaked
+
+
+def test_payout_pdf_for_owner_and_admin(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    res = post_payout(client, admin_headers, creator_id, note="Terima kasih", paid_at="2026-11-03")
+    payout_id = res.json()["data"]["id"]
+    url = f"/payouts/{payout_id}/pdf"
+
+    res = client.get(url, headers=login(client))
+    assert res.status_code == 200, res.text
+    assert res.headers["content-type"] == "application/pdf"
+    assert res.headers["content-disposition"] == 'attachment; filename="payout-squareclouds-kreator-2026-10.pdf"'
+    assert res.headers["cache-control"] == "no-store"
+    assert res.content.startswith(b"%PDF")
+
+    text = pdf_text(res.content)
+    for part in (
+        # Kop
+        "Created On: 3 November 2026",
+        "Revenue Month: Oktober 2026",
+        f"Slip No. PO-{payout_id:06d}",
+        # Pengirim: nama, email, alamat dari settings.company_address
+        "Squareclouds Studio",
+        "contact@squarecloudsmc.com",
+        "Jalan Halat, Gang Merdeka No.12",
+        "Kecamatan Medan Area, Kota Medan",
+        "Sumatera Utara 20216",
+        # Penerima
+        "Kreator",
+        "@kreator – Squareclouds Studio Creator",
+        "creator@example.com",
+        "Transfer bank BCA ****7890",
+        # Tabel
+        "Content",
+        "Units Sold",
+        "Earnings (USD)",
+        "Royal Mansion",
+        "$22.80",
+        "Total (USD)",
+        "Exchange Rate",
+        "Rp16.500,00/$",
+        "Total (IDR)",
+        "Rp376.200,00",
+        "Terima kasih",
+        "This slip is generated automatically by Creator Portal Squareclouds Studio",
+    ):
+        assert part in text, part
+    assert_no_internal_money(text)
+    assert BANK["account_number"] not in text
+
+    res = client.get(url, headers=admin_headers)
+    assert res.status_code == 200
+    assert res.headers["content-disposition"] == 'attachment; filename="payout-squareclouds-kreator-2026-10.pdf"'
+
+
+def test_payout_pdf_access(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    with SessionLocal() as db:
+        add_creator(db, "lain@example.com", "Kreator Lain", username="lain")
+        db.commit()
+    url = f"/payouts/{payout_id}/pdf"
+
+    assert client.get(url, headers=login(client, "lain@example.com")).status_code == 403
+    assert client.get(url).status_code == 401
+    assert client.get("/payouts/999/pdf", headers=admin_headers).status_code == 404
+
+
+def test_payout_pdf_paypal_has_no_rupiah(client, admin_headers):
+    creator_id = seed_creator(method="paypal", details={"paypal_email": "kreator@gmail.com"})
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    text = pdf_text(client.get(f"/payouts/{payout_id}/pdf", headers=admin_headers).content)
+    assert "PayPal kr***@gmail.com" in text
+    assert "kreator@gmail.com" not in text
+    assert "Total (USD)" in text
+    for absent in ("Rp", "Exchange Rate", "Total (IDR)", "Note"):
+        assert absent not in text, absent
+    assert_no_internal_money(text)
+
+
+def test_payout_pdf_for_legacy_payout_and_account_without_username(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK, username=None)
+    with SessionLocal() as db:
+        payout_id = add_payout(db, db.get(models.User, creator_id), 5.0).id
+        db.commit()
+
+    res = client.get(f"/payouts/{payout_id}/pdf", headers=admin_headers)
+    assert res.status_code == 200
+    expected = f'attachment; filename="payout-squareclouds-user{creator_id}-PO-{payout_id:06d}.pdf"'
+    assert res.headers["content-disposition"] == expected
+    text = pdf_text(res.content)
+    assert "Revenue Month: -" in text
+    assert "No per-content breakdown is available for this payout." in text
+    assert "$5.00" in text
+    assert "Squareclouds Studio Creator" in text
+    assert "@" not in text.replace("creator@example.com", "").replace("contact@squarecloudsmc.com", "")
+
+
+def test_payout_pdf_uses_company_address_setting(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    body = {"paypal_fee_pct": 5, "idr_rate": 16500, "company_address": "Jalan Baru No. 7\nMedan 20111"}
+    assert client.put("/settings", json=body, headers=admin_headers).status_code == 200
+
+    text = pdf_text(client.get(f"/payouts/{payout_id}/pdf", headers=admin_headers).content)
+    assert "Jalan Baru No. 7" in text
+    assert "Medan 20111" in text
+    assert "Jalan Halat" not in text
+
+
+def slip_data(item_count, **overrides):
+    data = dict(
+        slip_no="PO-000001", created_on="3 November 2026", revenue_month="Oktober 2026",
+        sender=["Squareclouds Studio"], recipient=["Kreator"],
+        items=[(f"Konten {i:02d}", str(i), f"${i}.00") for i in range(1, item_count + 1)],
+        total_units="1", total_usd="$1.00", exchange_rate="Rp16.500,00/$", total_idr="Rp16.500,00",
+        note=None, footer="footer",
+    )
+    return payout_slip.SlipData(**{**data, **overrides})
+
+
+def test_payout_pdf_fits_25_items_on_one_page():
+    pages = pdf_pages(payout_slip.render(slip_data(25)))
+    assert len(pages) == 1
+    assert "Konten 25" in pages[0]
+    assert "Total (IDR)" in pages[0]
+
+
+def test_payout_pdf_continues_after_25_items_with_repeated_header():
+    pages = pdf_pages(payout_slip.render(slip_data(30, note="Catatan panjang")))
+    assert len(pages) == 2
+    assert "Konten 25" in pages[0]
+    assert "Konten 26" not in pages[0]
+    assert "Total (USD)" not in pages[0]
+    for part in ("Content", "Units Sold", "Earnings (USD)", "Konten 26", "Konten 30", "Total (USD)", "Catatan panjang"):
+        assert part in pages[1], part
