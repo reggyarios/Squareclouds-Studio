@@ -60,7 +60,7 @@ Semua pembulatan ke 2 desimal hanya saat output.
 Admin (`require_admin`):
 - `GET /settings` → `{paypal_fee_pct, idr_rate, company_address}`; `PUT /settings` body sama, validasi `0 ≤ fee ≤ 100`, `rate > 0`.
   `company_address` (alamat pengirim di slip PDF, multi-baris) opsional di PUT (tidak dikirim = tidak berubah); baris kosong & spasi
-  tepi dibuang, wajib 1–5 baris dan ≤ 300 karakter. Di-seed `migrate_payouts.py` (alamat Medan).
+  tepi dibuang, wajib 1–3 baris dan ≤ 300 karakter. Di-seed `migrate_payouts.py` (alamat Medan).
 - `GET /users/{id}/earnings` → `creator_summary(include_internal=True)` + `months` + `payout_method` + `payout_details` **penuh**
   (admin perlu untuk membayar).
   `months` = `earnings.creator_months(db, user)`: dari bulan pertama kreator punya share > 0 sampai **bulan lengkap terakhir**,
@@ -100,15 +100,19 @@ Admin (`require_admin`):
 Slip PDF (reportlab, `backend/payout_slip.py` hanya tata letak; data disiapkan `main.payout_slip_pdf` dari `payout_items`):
 - Nama file `Payout Slip - <username> - <Bulan Tahun>.pdf`, mis. `Payout Slip - cgartz - Agustus 2026.pdf` (akun tanpa username:
   nama; payout lama tanpa periode: tanggal bayar).
-- Label Inggris seperti slip Pathway; tanggal & bulan format Indonesia; Helvetica; A4.
-- Kop: kiri logo `backend/assets/logo.png` (salinan `frontend/public/FLBT.png` yang diperkecil, tinggi 18 mm); kanan, tebal:
+- Meniru tata letak slip Pathway, hanya kop yang berbeda. Label Inggris; tanggal & bulan format Indonesia; Helvetica; A4, margin
+  40pt; teks #333, garis pemisah abu muda.
+- Kop: kiri logo `backend/assets/logo.png` (salinan `frontend/public/FLBT.png` yang diperkecil, tinggi 22 mm); kanan, tebal kecil:
   "Created On: <tanggal bayar>" dan "Revenue Month: <Bulan Tahun>". Tidak ada nomor slip.
-- Blok pengirim (kiri): Squareclouds Studio, contact@squarecloudsmc.com, lalu `company_address`. Blok penerima (kanan): nama,
-  username (tanpa "@"; dilewati kalau tidak ada), email, metode & tujuan termask.
-- Tabel Content | Units Sold | Earnings (USD), baris selang-seling, "Total (USD)"; non-PayPal + "Exchange Rate" dan
-  "Total (IDR)". Catatan admin di bawah tabel. Lebih dari 25 item: lanjut ke halaman berikut, header diulang.
-- Footer: "This slip is generated automatically by Creator Portal Squareclouds Studio · <host portal>".
-- **Tidak boleh** ada gross, net, fee, split, atau bagian Squareclouds.
+- Blok identitas (font normal): kiri Squareclouds Studio, contact@squarecloudsmc.com, lalu `company_address` (per baris, atau per
+  koma kalau satu baris; maks 3 baris, sisanya digabung ke baris terakhir). Kanan, rata kanan: nama, "<username> - Squareclouds
+  Studio" (dilewati kalau tidak ada username), email.
+- Tabel full width Content | Comment | Price (Comment rata tengah, Price rata kanan), header bergaris bawah, baris selang-seling.
+  Satu baris per konten: nama | "Creator Earnings" | bagian kreator. Tidak ada kolom unit, "Total Revenues", maupun potongan.
+- Di bawah tabel, rata kanan: "Subtotal: $X" (bold), garis, "Total: $X" (bold, lebih besar); non-PayPal + "Exchange Rate:
+  Rp16.500,00/$" dan "Total (IDR): Rp…" (kecil). Catatan admin sebagai paragraf kecil "Note: …".
+- Tanpa footer. Lebih dari 30 konten: lanjut ke halaman berikut, header tabel diulang.
+- **Tidak boleh** ada unit, gross, net, fee, split, bagian Squareclouds, maupun tujuan payout.
 
 Arsip Google Drive (`backend/gdrive.py`, google-api-python-client + google-auth):
 - Service account dari `GDRIVE_SA_FILE`, folder induk `GDRIVE_FOLDER_ID` (lihat `backend/.env.example`). Folder induk harus di

@@ -843,7 +843,7 @@ def current_settings(db: Session) -> dict:
     }
 
 
-MAX_COMPANY_ADDRESS_LINES = 5
+MAX_COMPANY_ADDRESS_LINES = 3  # sama dengan SLIP_ADDRESS_LINES
 MAX_COMPANY_ADDRESS_LENGTH = 300
 
 
@@ -942,25 +942,6 @@ def format_month_id(value: str) -> str:
     return f"{MONTHS_ID[int(value[5:7]) - 1]} {value[:4]}"
 
 
-def payout_destination_text(method: str, details: dict | None) -> str:
-    """Tujuan payout termask, mis. "Transfer bank BCA ****1234"."""
-    details = details or {}
-    if method == "paypal":
-        return f"PayPal {mask_email(str(details.get('paypal_email') or ''))}".strip()
-    if method == "bank":
-        number = str(details.get("account_number") or "")
-        return f"Transfer bank {details.get('bank_name') or ''} ****{number[-4:]}"
-    if method == "ewallet":
-        phone = str(details.get("phone") or "")
-        return f"{details.get('provider') or 'E-wallet'} ****{phone[-4:]}"
-    return method
-
-
-def format_count(value: int) -> str:
-    """6396 -> "6.396" (pemisah ribuan Indonesia, sama dengan toLocaleString id-ID)."""
-    return f"{value:,}".replace(",", ".")
-
-
 def payout_shows_idr(payout: models.Payout) -> bool:
     """Rupiah hanya untuk payout non-PayPal yang punya snapshot kurs."""
     return payout.method != "paypal" and payout.amount_idr is not None and bool(payout.idr_rate)
@@ -991,38 +972,47 @@ def payout_slip_filename(user: models.User, payout: models.Payout) -> str:
     return UNSAFE_FILENAME_CHARS.sub("-", f"Payout Slip - {who} - {payout_period_label(payout)}.pdf")
 
 
+SLIP_ADDRESS_LINES = 3
+
+
+def slip_address_lines(address: str) -> list[str]:
+    """Alamat perusahaan untuk blok pengirim slip: per baris, atau per koma
+    kalau alamatnya satu baris. Maksimal 3 baris; sisanya digabung ke baris
+    terakhir supaya tidak ada yang hilang."""
+    lines = [line.strip() for line in address.splitlines() if line.strip()]
+    if len(lines) == 1:
+        lines = [part.strip() for part in lines[0].split(",") if part.strip()]
+    if len(lines) > SLIP_ADDRESS_LINES:
+        lines = lines[: SLIP_ADDRESS_LINES - 1] + [", ".join(lines[SLIP_ADDRESS_LINES - 1:])]
+    return lines
+
+
 def payout_slip_pdf(db: Session, user: models.User, payout: models.Payout) -> bytes:
     """Slip PDF di memori (tidak pernah ditulis ke disk/DB); dibuat ulang tiap
     kali dikirim: payout baru, kirim ulang email, upload ulang ke Drive.
-    Hanya unit dan bagian kreator; gross/net/fee/split tidak pernah masuk slip."""
+    Hanya bagian kreator per konten; unit, gross/net/fee/split, dan bagian
+    Squareclouds tidak pernah masuk slip."""
     show_idr = payout_shows_idr(payout)
-    items = payout.items
     return payout_slip.render(payout_slip.SlipData(
         title=payout_slip_filename(user, payout).removesuffix(".pdf"),
         created_on=format_date_id(payout.paid_at),
         revenue_month=format_month_id(payout.period_month) if payout.period_month else "-",
-        sender=[SLIP_SENDER_NAME, SLIP_SENDER_EMAIL, *earnings.company_address(db).splitlines()],
+        sender=[SLIP_SENDER_NAME, SLIP_SENDER_EMAIL, *slip_address_lines(earnings.company_address(db))],
         # Baris username dilewati untuk akun lama tanpa username.
         recipient=[
             line
             for line in (
                 user.name,
-                user.username,
+                f"{user.username} - Squareclouds Studio" if user.username else None,
                 user.email,
-                payout_destination_text(payout.method, earnings.load_details(payout.details)),
             )
             if line
         ],
-        items=[(i.content_name, format_count(i.units), earnings.format_usd(i.share_usd)) for i in items],
-        total_units=format_count(sum(i.units for i in items)) if items else None,
+        items=[(i.content_name, earnings.format_usd(i.share_usd)) for i in payout.items],
         total_usd=earnings.format_usd(payout.amount_usd),
         exchange_rate=f"{earnings.format_idr(payout.idr_rate)}/$" if show_idr else None,
         total_idr=earnings.format_idr(payout.amount_idr) if show_idr else None,
         note=payout.note,
-        footer=(
-            "This slip is generated automatically by Creator Portal Squareclouds Studio · "
-            + portal_url().split("://", 1)[-1]
-        ),
     ))
 
 

@@ -458,7 +458,8 @@ def test_settings_company_address(client, admin_headers):
     # Spasi di tepi dan baris kosong dibuang.
     assert res.json()["data"]["company_address"] == "Jl. Baru No. 1\nMedan 20111"
 
-    for address in ("", "  \n  ", "\n".join(f"Baris {i}" for i in range(6)), "x" * 301):
+    # Maksimal 3 baris (sama dengan blok pengirim slip) dan 300 karakter.
+    for address in ("", "  \n  ", "\n".join(f"Baris {i}" for i in range(4)), "x" * 301):
         res = client.put("/settings", json={**base, "company_address": address}, headers=admin_headers)
         assert res.status_code == 400, address
     assert client.get("/settings", headers=admin_headers).json()["company_address"] == "Jl. Baru No. 1\nMedan 20111"
@@ -1111,7 +1112,13 @@ def test_resend_payout_email(client, admin_headers, monkeypatch):
 # ============================================================================
 
 # Tidak boleh ada di slip kreator (huruf kecil, dicek sebagai substring).
-FORBIDDEN_SLIP_WORDS = ("gross", "net", "fee", "split", "bagian squareclouds", "squareclouds share")
+FORBIDDEN_SLIP_WORDS = (
+    "gross", "net", "fee", "split", "bagian squareclouds", "squareclouds share",
+    "units", "total revenues", "slip no", "this slip is generated",
+)
+# Satu-satunya "@" yang boleh ada di slip: email pengirim dan email penerima
+# (keduanya memang bagian blok identitas). "@username" tidak boleh.
+SLIP_EMAILS = ("contact@squarecloudsmc.com", "creator@example.com")
 
 
 def pdf_pages(content):
@@ -1127,24 +1134,18 @@ def assert_no_internal_money(text):
     assert leaked == [], leaked
 
 
-SLIP_FOOTER = "This slip is generated automatically by Creator Portal Squareclouds Studio"
+def assert_no_at_sign_outside_emails(text):
+    for email in SLIP_EMAILS:
+        text = text.replace(email, "")
+    assert "@" not in text
 
 
 def assert_consecutive_lines(text, expected):
-    """expected muncul berurutan sebagai baris utuh (pypdf kadang memberi spasi di depan baris)."""
+    """expected muncul berurutan sebagai baris utuh (pypdf kadang memberi spasi
+    di depan baris, dan tiap sel tabel jadi baris sendiri)."""
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     windows = [lines[i:i + len(expected)] for i in range(len(lines))]
     assert expected in windows, lines
-
-
-def assert_recipient_without_creator_label(text, username="kreator"):
-    """Tidak ada "@username" dan tidak ada "Creator" di slip, kecuali footer
-    "...by Creator Portal Squareclouds Studio" yang memang bagian layout."""
-    assert f"@{username}" not in text
-    assert "Squareclouds Studio Creator" not in text
-    body = [line for line in text.splitlines() if not line.startswith(SLIP_FOOTER)]
-    assert len(body) < len(text.splitlines()), "footer tidak ditemukan"
-    assert not [line for line in body if "Creator" in line], body
 
 
 def sent_slip(outbox):
@@ -1157,58 +1158,64 @@ def sent_slip(outbox):
 
 def test_payout_slip_content(client, admin_headers, outbox):
     creator_id = seed_creator(method="bank", details=BANK)
-    res = post_payout(client, admin_headers, creator_id, note="Terima kasih", paid_at="2026-11-03")
-    payout_id = res.json()["data"]["id"]
+    post_payout(client, admin_headers, creator_id, note="Terima kasih", paid_at="2026-11-03")
 
     filename, text = sent_slip(outbox)
     assert filename == "Payout Slip - kreator - Oktober 2026.pdf"
     for part in (
-        # Kop
         "Created On: 3 November 2026",
         "Revenue Month: Oktober 2026",
-        # Pengirim: nama, email, alamat dari settings.company_address
+        "Creator Earnings",
+        "Subtotal: $22.80",
+        "Total: $22.80",
+        "Exchange Rate: Rp16.500,00/$",
+        "Total (IDR): Rp376.200,00",
+        "Note: Terima kasih",
+    ):
+        assert part in text, part
+    # Kiri: pengirim + alamat dari settings.company_address.
+    assert_consecutive_lines(text, [
         "Squareclouds Studio",
         "contact@squarecloudsmc.com",
         "Jalan Halat, Gang Merdeka No.12",
         "Kecamatan Medan Area, Kota Medan",
         "Sumatera Utara 20216",
-        # Penerima
-        "creator@example.com",
-        "Transfer bank BCA ****7890",
-        # Tabel
-        "Content",
-        "Units Sold",
-        "Earnings (USD)",
-        "Royal Mansion",
-        "$22.80",
-        "Total (USD)",
-        "Exchange Rate",
-        "Rp16.500,00/$",
-        "Total (IDR)",
-        "Rp376.200,00",
-        "Terima kasih",
-        "This slip is generated automatically by Creator Portal Squareclouds Studio",
-    ):
-        assert part in text, part
+    ])
+    # Kanan: nama, "<username> - Squareclouds Studio", email.
+    assert_consecutive_lines(text, ["Kreator", "kreator - Squareclouds Studio", "creator@example.com"])
+    # Tabel: Content | Comment | Price, satu baris per konten.
+    assert_consecutive_lines(text, ["Content", "Comment", "Price", "Royal Mansion", "Creator Earnings", "$22.80"])
+
     assert_no_internal_money(text)
-    assert BANK["account_number"] not in text
-    # Blok penerima: nama, username tanpa "@", email, tujuan termask.
-    assert_consecutive_lines(text, ["Kreator", "kreator", "creator@example.com", "Transfer bank BCA ****7890"])
-    assert_recipient_without_creator_label(text)
-    assert "Slip No." not in text
-    assert "PO-" not in text
+    assert_no_at_sign_outside_emails(text)
+    # Tujuan payout, nomor slip, dan footer tidak lagi ada di slip.
+    for absent in ("Transfer bank", "BCA", BANK["account_number"], "PO-", "Squareclouds Studio Creator"):
+        assert absent not in text, absent
+
+
+def test_payout_slip_one_row_per_content(client, admin_headers, outbox):
+    creator_id = seed_two_content_creator()
+    post_payout(client, admin_headers, creator_id)
+    _, text = sent_slip(outbox)
+    assert_consecutive_lines(text, [
+        "Konten A", "Creator Earnings", "$0.29",
+        "Konten B", "Creator Earnings", "$0.28",
+        "Subtotal: $0.57",
+        "Total: $0.57",
+    ])
+    assert text.count("Creator Earnings") == 2
+    assert_no_internal_money(text)
 
 
 def test_payout_slip_paypal_has_no_rupiah(client, admin_headers, outbox):
     creator_id = seed_creator(method="paypal", details={"paypal_email": "kreator@gmail.com"})
     post_payout(client, admin_headers, creator_id)
     _, text = sent_slip(outbox)
-    assert "PayPal kr***@gmail.com" in text
-    assert "kreator@gmail.com" not in text
-    assert "Total (USD)" in text
-    for absent in ("Rp", "Exchange Rate", "Total (IDR)", "Note"):
+    assert "Total: $22.80" in text
+    for absent in ("Rp", "Exchange Rate", "Total (IDR)", "Note", "PayPal", "kreator@gmail.com", "kr***"):
         assert absent not in text, absent
     assert_no_internal_money(text)
+    assert_no_at_sign_outside_emails(text)
 
 
 def test_payout_slip_for_legacy_payout_and_account_without_username(client, admin_headers, outbox):
@@ -1224,49 +1231,62 @@ def test_payout_slip_for_legacy_payout_and_account_without_username(client, admi
     assert filename == "Payout Slip - Kreator - 1 November 2026.pdf"
     assert "Revenue Month: -" in text
     assert "No per-content breakdown is available for this payout." in text
-    assert "$5.00" in text
-    # Baris username dilewati: nama langsung diikuti email.
+    assert "Total: $5.00" in text
+    # Baris "<username> - Squareclouds Studio" dilewati: nama langsung diikuti email.
     assert_consecutive_lines(text, ["Kreator", "creator@example.com"])
-    assert_recipient_without_creator_label(text)
+    assert_no_at_sign_outside_emails(text)
 
 
 def test_payout_slip_uses_company_address_setting(client, admin_headers, outbox):
-    body = {"paypal_fee_pct": 5, "idr_rate": 16500, "company_address": "Jalan Baru No. 7\nMedan 20111"}
+    body = {"paypal_fee_pct": 5, "idr_rate": 16500, "company_address": "Jalan Baru No. 7, Medan, Sumatera Utara 20111"}
     assert client.put("/settings", json=body, headers=admin_headers).status_code == 200
     creator_id = seed_creator(method="bank", details=BANK)
     post_payout(client, admin_headers, creator_id)
 
     _, text = sent_slip(outbox)
-    assert "Jalan Baru No. 7" in text
-    assert "Medan 20111" in text
+    # Satu baris dengan koma: dipecah per koma.
+    assert_consecutive_lines(text, [
+        "contact@squarecloudsmc.com", "Jalan Baru No. 7", "Medan", "Sumatera Utara 20111"
+    ])
     assert "Jalan Halat" not in text
+
+
+def test_slip_address_lines():
+    import main
+
+    assert main.slip_address_lines("A\nB\nC") == ["A", "B", "C"]
+    assert main.slip_address_lines("  A  \n\n B ") == ["A", "B"]
+    # Satu baris: dipecah per koma; baris yang sudah dipisah tidak dipecah lagi.
+    assert main.slip_address_lines("Jl. A No. 1, Medan, Sumut 20111") == ["Jl. A No. 1", "Medan", "Sumut 20111"]
+    assert main.slip_address_lines("Jl. A, Gg. B\nMedan") == ["Jl. A, Gg. B", "Medan"]
+    # Maksimal 3 baris; sisanya digabung ke baris terakhir.
+    assert main.slip_address_lines("A, B, C, D, E") == ["A", "B", "C, D, E"]
+    assert main.slip_address_lines("") == []
 
 
 def slip_data(item_count, **overrides):
     data = dict(
         title="Payout Slip - kreator - Oktober 2026", created_on="3 November 2026", revenue_month="Oktober 2026",
         sender=["Squareclouds Studio"], recipient=["Kreator"],
-        items=[(f"Konten {i:02d}", str(i), f"${i}.00") for i in range(1, item_count + 1)],
-        total_units="1", total_usd="$1.00", exchange_rate="Rp16.500,00/$", total_idr="Rp16.500,00",
-        note=None, footer="footer",
+        items=[(f"Konten {i:02d}", f"${i}.00") for i in range(1, item_count + 1)],
+        total_usd="$1.00", exchange_rate="Rp16.500,00/$", total_idr="Rp16.500,00", note=None,
     )
     return payout_slip.SlipData(**{**data, **overrides})
 
 
-def test_payout_pdf_fits_25_items_on_one_page():
-    pages = pdf_pages(payout_slip.render(slip_data(25)))
-    assert len(pages) == 1
-    assert "Konten 25" in pages[0]
-    assert "Total (IDR)" in pages[0]
+def test_payout_pdf_fits_30_items_on_first_page():
+    pages = pdf_pages(payout_slip.render(slip_data(30)))
+    assert "Konten 30" in pages[0]
 
 
-def test_payout_pdf_continues_after_25_items_with_repeated_header():
-    pages = pdf_pages(payout_slip.render(slip_data(30, note="Catatan panjang")))
+def test_payout_pdf_continues_after_30_items_with_repeated_header():
+    pages = pdf_pages(payout_slip.render(slip_data(31, note="Catatan panjang")))
     assert len(pages) == 2
-    assert "Konten 25" in pages[0]
-    assert "Konten 26" not in pages[0]
-    assert "Total (USD)" not in pages[0]
-    for part in ("Content", "Units Sold", "Earnings (USD)", "Konten 26", "Konten 30", "Total (USD)", "Catatan panjang"):
+    assert "Konten 30" in pages[0]
+    assert "Konten 31" not in pages[0]
+    assert "Total:" not in pages[0]
+    assert_consecutive_lines(pages[1], ["Content", "Comment", "Price", "Konten 31", "Creator Earnings", "$31.00"])
+    for part in ("Subtotal: $1.00", "Total: $1.00", "Total (IDR): Rp16.500,00", "Note: Catatan panjang"):
         assert part in pages[1], part
 
 

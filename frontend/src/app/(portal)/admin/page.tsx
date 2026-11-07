@@ -1330,9 +1330,9 @@ export default function AdminDashboard() {
                   className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-2 text-sm focus:border-blue-500 focus:outline-none"
                 />
                 <span className="mt-1 block text-xs text-gray-500">
-                  Tampil di blok pengirim slip PDF, di bawah nama dan email Squareclouds Studio. Satu
-                  baris per baris alamat, maksimal 5 baris. Berlaku untuk slip yang dibuat sesudah
-                  disimpan (payout baru, kirim ulang email, upload ulang ke Drive).
+                  Tampil di blok pengirim slip PDF, di bawah nama dan email Squareclouds Studio.
+                  Maksimal 3 baris; alamat satu baris dipecah per koma. Berlaku untuk slip yang dibuat
+                  sesudah disimpan (payout baru, kirim ulang email, upload ulang ke Drive).
                 </span>
               </label>
               <button
