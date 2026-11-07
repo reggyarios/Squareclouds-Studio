@@ -82,27 +82,39 @@ Admin (`require_admin`):
   - `outstanding_usd` tetap = total share − total dibayar (termasuk payout lama dan bulan berjalan).
   - Rincian disalin ke tabel `payout_items` (`payout_id` FK ON DELETE CASCADE, `content_id`, snapshot `content_name`, `units`,
     `share_usd`, `split_pct`), dibuat `migrate_payouts.py`. Σ `share_usd` item = `amount_usd`. Payout lama tidak punya item.
-- `DELETE /payouts/{id}` (koreksi salah input; bulannya bisa dicatat ulang).
+  - Setelah tersimpan: slip PDF dibuat **sekali di memori** (tidak ditulis ke disk/DB), dikirim lewat email, lalu file yang sama
+    diarsipkan ke Google Drive (lihat bawah). Respons `{message, notified, drive_saved, data}`; email atau Drive yang gagal hanya
+    dicatat ke log dan disebut di `message`, payout tetap 201.
+- `DELETE /payouts/{id}` (koreksi salah input; bulannya bisa dicatat ulang). Kalau `drive_file_id` ada, file di Drive ikut dihapus
+  (error Drive diabaikan, dicatat ke log).
+- `POST /payouts/{id}/notify`: kirim ulang email; slip dibuat ulang di memori.
+- `POST /payouts/{id}/drive`: upload ulang slip ke Drive; 400 jika sudah tersimpan, 502 jika gagal lagi.
 - Email payout ke kreator: baris **Periode** (mis. "Oktober 2026") di atas Jumlah; payout lama tanpa periode tidak punya baris itu.
   Rupiah memakai `earnings.format_idr` (§5 Format angka). Isi email juga memuat tabel ringkas per konten (nama, unit, USD) + total,
-  dan slip PDF yang sama dengan unduhan dilampirkan (`mailer.send_mail(..., attachments=...)`).
-- Riwayat payout (admin & kreator) menyertakan `period_month`.
+  dan slip PDF dilampirkan (`mailer.send_mail(..., attachments=...)`).
+- Riwayat payout (admin & kreator) menyertakan `period_month`; admin juga `drive_file_id`.
+- Slip **tidak bisa diunduh** dari portal (tidak ada endpoint detail/PDF); salinannya hanya di email kreator dan arsip Drive.
 
-Admin, atau kreator pemilik payout (kreator lain 403, tanpa token 401):
-- `GET /payouts/{id}` → payout + `items`. Untuk kreator tanpa snapshot `details`, field admin, maupun `split_pct`.
-- `GET /payouts/{id}/pdf` → slip PDF (reportlab, `backend/payout_slip.py`), `Content-Disposition: attachment;
-  filename="payout-squareclouds-<username>-<YYYY-MM>.pdf"` (payout lama: nomor slip; akun tanpa username: `user<id>`).
-  CORS mengekspos `Content-Disposition` supaya frontend bisa membaca nama file. Isi slip (label Inggris seperti slip Pathway;
-  tanggal & bulan format Indonesia; Helvetica; A4):
-  - Kop: kiri logo `backend/assets/logo.png` (salinan `frontend/public/FLBT.png` yang diperkecil, tinggi 18 mm); kanan, tebal:
-    "Created On: <tanggal bayar>", "Revenue Month: <Bulan Tahun>", kecil "Slip No. PO-000012".
-  - Blok pengirim (kiri): Squareclouds Studio, contact@squarecloudsmc.com, lalu `company_address`. Blok penerima (kanan): nama,
-    "@username – Squareclouds Studio Creator", email, metode & tujuan termask.
-  - Tabel Content | Units Sold | Earnings (USD), baris selang-seling, "Total (USD)"; non-PayPal + "Exchange Rate" dan
-    "Total (IDR)". Catatan admin di bawah tabel. Lebih dari 25 item: lanjut ke halaman berikut, header diulang.
-  - Footer: "This slip is generated automatically by Creator Portal Squareclouds Studio · <host portal>".
-  - **Tidak boleh** ada gross, net, fee, split, atau bagian Squareclouds (`payout_slip.py` hanya menerima teks yang sudah
-    disiapkan `main.payout_slip_pdf`).
+Slip PDF (reportlab, `backend/payout_slip.py` hanya tata letak; data disiapkan `main.payout_slip_pdf` dari `payout_items`):
+- Nama file `Payout Slip - <username> - <Bulan Tahun>.pdf`, mis. `Payout Slip - cgartz - Agustus 2026.pdf` (akun tanpa username:
+  nama; payout lama tanpa periode: tanggal bayar).
+- Label Inggris seperti slip Pathway; tanggal & bulan format Indonesia; Helvetica; A4.
+- Kop: kiri logo `backend/assets/logo.png` (salinan `frontend/public/FLBT.png` yang diperkecil, tinggi 18 mm); kanan, tebal:
+  "Created On: <tanggal bayar>" dan "Revenue Month: <Bulan Tahun>". Tidak ada nomor slip.
+- Blok pengirim (kiri): Squareclouds Studio, contact@squarecloudsmc.com, lalu `company_address`. Blok penerima (kanan): nama,
+  username (tanpa "@"; dilewati kalau tidak ada), email, metode & tujuan termask.
+- Tabel Content | Units Sold | Earnings (USD), baris selang-seling, "Total (USD)"; non-PayPal + "Exchange Rate" dan
+  "Total (IDR)". Catatan admin di bawah tabel. Lebih dari 25 item: lanjut ke halaman berikut, header diulang.
+- Footer: "This slip is generated automatically by Creator Portal Squareclouds Studio · <host portal>".
+- **Tidak boleh** ada gross, net, fee, split, atau bagian Squareclouds.
+
+Arsip Google Drive (`backend/gdrive.py`, google-api-python-client + google-auth):
+- Service account dari `GDRIVE_SA_FILE`, folder induk `GDRIVE_FOLDER_ID` (lihat `backend/.env.example`). Folder induk harus di
+  Shared Drive (service account tidak punya kuota sendiri) dengan service account sebagai Content manager; semua panggilan
+  `supportsAllDrives=True`.
+- Slip disimpan di subfolder per tahun-bulan periode (`2026-08/`; payout lama: bulan bayar), dibuat otomatis bila belum ada.
+- File ID disimpan di `payouts.drive_file_id` (kolom baru, `migrate_payouts.py`). NULL = belum tersimpan (env kosong, upload gagal,
+  atau payout lama).
 - `GET /admin-reports/`: ganti perhitungan lama (`price × unit`) dengan `admin_overview`; tambahkan `net_usd`, `creators_share_usd`,
   `squareclouds_share_usd` per konten & per bulan. Bentuk respons lama yang dipakai tab Laporan boleh diubah, sesuaikan frontend-nya.
 
@@ -121,8 +133,8 @@ Kreator (`app/(portal)/creator/page.tsx`):
   "Payout bank/e-wallet dikonversi dengan kurs Rp{idr_rate}/$ yang ditetapkan Squareclouds Studio."
 - Tabel **Per konten**: nama, status, unit terjual, **pendapatan saya**. Tidak ada kolom harga/gross/net/split.
 - Tabel **Per bulan**: bulan, unit terjual, pendapatan saya.
-- Tabel **Riwayat payout**: periode, tanggal, jumlah USD, (IDR & kurs bila ada), metode, catatan; tombol **Rincian** (baris
-  terbuka berisi rincian per konten dari `GET /payouts/{id}`) dan **Unduh PDF**.
+- Tabel **Riwayat payout**: periode, tanggal, jumlah USD, rupiah + kurs (bila ada), metode, catatan. Tanpa tombol (slip ada di
+  email).
 
 Admin (`app/(portal)/admin/page.tsx`):
 - Tab baru **Pengaturan**: fee PayPal %, kurs IDR, alamat perusahaan (textarea, untuk slip PDF) + Simpan.
@@ -132,8 +144,9 @@ Admin (`app/(portal)/admin/page.tsx`):
     "Oktober 2026 — $123.45 (≈ Rp2.036.925,00)" (bagian rupiah hanya non-PayPal), default bulan tertua. Di bawah dropdown: tabel
     preview per konten dari `months[].items` (nama, unit, USD) + total USD, plus total IDR & kurs jika non-PayPal. **Tidak ada input
     jumlah.** Tanggal bayar & catatan tetap.
-  - Bulan yang sudah dibayar tidak ada di dropdown; tampil di riwayat payout, yang punya kolom **Periode** (payout lama: "-") dan
-    tombol **Rincian** (expand items), **PDF**, Hapus.
+  - Bulan yang sudah dibayar tidak ada di dropdown; tampil di riwayat payout, yang punya kolom **Periode** (payout lama: "-"),
+    kolom **Email & Drive** (status email + kirim ulang; "Drive: tersimpan" yang menautkan ke file, atau "Drive: gagal" dengan
+    tombol **Upload ulang**), dan tombol Hapus.
 - Tab **Konten**: tambah kolom Gross & Net (all-time).
 - Tab **Laporan**: sesuaikan dengan respons baru; tampilkan baris total: gross, net, bagian kreator, bagian Squareclouds.
 
