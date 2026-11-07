@@ -2,6 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Modal, useConfirmDialog } from "@/components/portal/Modal";
 import { PayoutItemsTable } from "@/components/portal/PayoutItems";
 import { apiFetch } from "@/lib/auth";
 import {
@@ -250,6 +251,8 @@ export default function AdminDashboard() {
   const [deletingPayoutId, setDeletingPayoutId] = useState<number | null>(null);
   const [notifyingPayoutId, setNotifyingPayoutId] = useState<number | null>(null);
   const [uploadingDrivePayoutId, setUploadingDrivePayoutId] = useState<number | null>(null);
+  // Pengganti window.confirm (Modal); {confirmDialog} dirender di akhir halaman.
+  const [askConfirm, confirmDialog] = useConfirmDialog();
   const [payoutPesan, setPayoutPesan] = useState({ type: "", text: "" });
 
   const [pesan, setPesan] = useState({ type: "", text: "" });
@@ -376,9 +379,14 @@ export default function AdminDashboard() {
   const handleResendInvite = (inv: Invitation) =>
     runInviteAction(inv.id, () => sendInvite(inv.email));
 
-  const handleCancelInvite = (inv: Invitation) => {
-    if (!confirm(`Batalkan undangan untuk ${inv.email}? Link di email tidak akan bisa dipakai lagi.`))
-      return;
+  const handleCancelInvite = async (inv: Invitation) => {
+    const confirmed = await askConfirm({
+      title: "Batalkan undangan?",
+      message: `Undangan untuk ${inv.email} dibatalkan. Link di email tidak akan bisa dipakai lagi.`,
+      confirmLabel: "Batalkan undangan",
+      danger: true,
+    });
+    if (!confirmed) return;
     runInviteAction(inv.id, async () => {
       const data = await api(`/invitations/${inv.id}`, { method: "DELETE" });
       setPesan({ type: "success", text: data.message });
@@ -429,8 +437,14 @@ export default function AdminDashboard() {
       `${u.name} disetujui dan sekarang bisa login.`
     );
 
-  const handleReject = (u: Creator) => {
-    if (!confirm(`Tolak pendaftaran ${u.name} (${u.email})? Akun akan dihapus permanen.`)) return;
+  const handleReject = async (u: Creator) => {
+    const confirmed = await askConfirm({
+      title: "Tolak pendaftaran?",
+      message: `Pendaftaran ${u.name} (${u.email}) ditolak dan akunnya dihapus permanen.`,
+      confirmLabel: "Tolak",
+      danger: true,
+    });
+    if (!confirmed) return;
     runUserAction(
       u,
       () => api(`/users/${u.id}`, { method: "DELETE" }),
@@ -440,19 +454,21 @@ export default function AdminDashboard() {
 
   // runUserAction memuat ulang daftar kreator dan konten: split kreator ini
   // ikut terhapus di backend.
-  const handleDelete = (u: Creator) => {
+  const handleDelete = async (u: Creator) => {
     const linked = linkedCount[u.id] || 0;
     const linkedText =
       linked > 0
         ? `Tertaut ke ${linked} konten; split-nya di konten tersebut ikut dihapus.`
         : "Belum tertaut ke konten mana pun.";
-    if (
-      !confirm(
-        `Hapus akun ${u.name} (${u.email}) secara permanen?\n\n${linkedText}\n` +
-          "Riwayat payout kreator ini juga ikut dihapus. Tindakan ini tidak bisa dibatalkan."
-      )
-    )
-      return;
+    const confirmed = await askConfirm({
+      title: "Hapus akun kreator?",
+      message:
+        `Akun ${u.name} (${u.email}) dihapus secara permanen.\n\n${linkedText}\n` +
+        "Riwayat payout kreator ini juga ikut dihapus. Tindakan ini tidak bisa dibatalkan.",
+      confirmLabel: "Hapus permanen",
+      danger: true,
+    });
+    if (!confirmed) return;
     runUserAction(
       u,
       () => api(`/users/${u.id}`, { method: "DELETE" }),
@@ -467,9 +483,17 @@ export default function AdminDashboard() {
       `Job title ${u.name} diperbarui.`
     );
 
-  const handleToggleStatus = (u: Creator) => {
+  const handleToggleStatus = async (u: Creator) => {
     const next = u.account_status === "Active" ? "Inactive" : "Active";
-    if (next === "Inactive" && !confirm(`Nonaktifkan ${u.name}? Kreator ini tidak akan bisa login.`))
+    if (
+      next === "Inactive" &&
+      !(await askConfirm({
+        title: "Nonaktifkan kreator?",
+        message: `${u.name} tidak akan bisa login sampai diaktifkan lagi.`,
+        confirmLabel: "Nonaktifkan",
+        danger: true,
+      }))
+    )
       return;
     runUserAction(
       u,
@@ -569,15 +593,18 @@ export default function AdminDashboard() {
 
   const handleDeletePayout = async (p: Payout) => {
     if (!earningsPanel) return;
-    if (
-      !confirm(
-        `Hapus payout ${p.period_month ? `${formatMonth(p.period_month)} ` : ""}` +
-          `${formatUsd(p.amount_usd)} tanggal ${formatDate(p.paid_at)}?\n\n` +
-          "Gunakan hanya untuk koreksi salah input. Saldo tertunda kreator akan bertambah lagi" +
-          (p.period_month ? " dan bulan itu bisa dicatat ulang." : ".")
-      )
-    )
-      return;
+    const confirmed = await askConfirm({
+      title: "Hapus payout?",
+      message:
+        `Payout ${p.period_month ? `${formatMonth(p.period_month)} ` : ""}` +
+        `${formatUsd(p.amount_usd)} tanggal ${formatDate(p.paid_at)} akan dihapus.\n\n` +
+        "Gunakan hanya untuk koreksi salah input. Saldo tertunda kreator akan bertambah lagi" +
+        (p.period_month ? " dan bulan itu bisa dicatat ulang." : ".") +
+        (p.drive_file_id ? " Slip di Google Drive ikut dihapus." : ""),
+      confirmLabel: "Hapus payout",
+      danger: true,
+    });
+    if (!confirmed) return;
     const { user } = earningsPanel;
     setDeletingPayoutId(p.id);
     setPayoutPesan({ type: "", text: "" });
@@ -713,6 +740,12 @@ export default function AdminDashboard() {
     : (report?.totals ?? null);
 
   const earningsData = earningsPanel?.data ?? null;
+  // Selama ada aksi payout berjalan, modal tidak bisa ditutup (backdrop/Escape/Tutup).
+  const payoutBusy =
+    savingPayout ||
+    deletingPayoutId !== null ||
+    notifyingPayoutId !== null ||
+    uploadingDrivePayoutId !== null;
   const periodOptions = earningsData ? payableMonths(earningsData.months) : [];
   const selectedPeriod = periodOptions.find((m) => m.month === payoutForm.period_month) ?? null;
   // Sama dengan syarat POST /payouts di backend.
@@ -1349,423 +1382,350 @@ export default function AdminDashboard() {
 
       {/* MODAL PENDAPATAN & PAYOUT */}
       {earningsPanel && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white p-6 md:p-8 rounded-3xl max-w-5xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-start gap-4 mb-6">
-              <div>
-                <h3 className="text-xl font-bold">Pendapatan & Payout</h3>
-                <p className="text-sm text-gray-500">
-                  {earningsPanel.user.name} · {earningsPanel.user.email}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setEarningsPanel(null)}
-                className="px-4 py-2 rounded-xl text-sm font-bold bg-gray-100 hover:bg-gray-200 transition"
-              >
-                Tutup
-              </button>
+        <Modal
+          title="Pendapatan & Payout"
+          subtitle={`${earningsPanel.user.name} · ${earningsPanel.user.email}`}
+          onClose={() => setEarningsPanel(null)}
+          isProcessing={payoutBusy}
+          width="max-w-5xl"
+        >
+          {earningsPanel.error ? (
+            <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">
+              {earningsPanel.error}
             </div>
-
-            {earningsPanel.error ? (
-              <div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">
-                {earningsPanel.error}
-              </div>
-            ) : !earningsData ? (
-              <p className="text-sm font-bold text-blue-600">Memuat...</p>
-            ) : (
-              <div className="space-y-6">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  {(
-                    [
-                      ["Total diperoleh", earningsData.total_earned_usd, earningsData.total_earned_idr],
-                      ["Sudah dibayar", earningsData.total_paid_usd, earningsData.total_paid_idr],
-                      ["Saldo tertunda", earningsData.outstanding_usd, earningsData.outstanding_idr],
-                    ] as const
-                  ).map(([label, usd, idr]) => (
-                    <div key={label} className="rounded-2xl bg-gray-50 p-4">
-                      <p className="text-xs font-bold uppercase text-gray-400">{label}</p>
-                      <p className="text-2xl font-black text-gray-900">{formatUsd(usd)}</p>
-                      {idr !== null && (
-                        <p className="text-xs font-bold text-gray-500">≈ {formatIDR(idr)}</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-
-                {!earningsData.payout_method && (
-                  <div className="rounded-xl bg-amber-50 p-3 text-sm font-bold text-amber-700">
-                    Kreator ini belum mengisi metode payout, jadi pembayaran belum bisa dicatat.
-                    Minta kreator mengisinya di dashboard mereka.
-                  </div>
-                )}
-                {earningsPanel.user.account_status !== "Active" && (
-                  <div className="rounded-xl bg-amber-50 p-3 text-sm font-bold text-amber-700">
-                    Kreator nonaktif: pembayaran hanya bisa dicatat untuk kreator berstatus Active.
-                  </div>
-                )}
-
-                {earningsData.payout_method && (
-                  <div className="rounded-2xl border border-gray-100 p-4">
-                    <h4 className="text-sm font-bold text-gray-800 mb-2">Data payout</h4>
-                    <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
-                      <dt className="text-gray-500">Metode</dt>
-                      <dd className="font-bold text-gray-900">
-                        {PAYOUT_METHOD_LABEL[earningsData.payout_method]}
-                      </dd>
-                      {PAYOUT_FIELDS[earningsData.payout_method].map((f) => (
-                        <Fragment key={f}>
-                          <dt className="text-gray-500">{PAYOUT_FIELD_LABEL[f]}</dt>
-                          <dd className="font-mono font-bold text-gray-900 select-all break-all">
-                            {earningsData.payout_details?.[f] || "-"}
-                          </dd>
-                        </Fragment>
-                      ))}
-                    </dl>
-                  </div>
-                )}
-
-                <div>
-                  <h4 className="text-sm font-bold text-gray-800 mb-2">Per konten (sejak rilis)</h4>
-                  <div className="rounded-2xl border border-gray-100 overflow-x-auto">
-                    <table className="w-full text-left text-sm">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Konten</th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
-                            Unit
-                          </th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
-                            Gross
-                          </th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
-                            Net
-                          </th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
-                            Split
-                          </th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
-                            Bagian kreator
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {earningsData.by_content.length === 0 ? (
-                          <tr>
-                            <td colSpan={6} className="px-4 py-4 text-center text-gray-400 font-bold">
-                              Belum tertaut ke konten mana pun.
-                            </td>
-                          </tr>
-                        ) : (
-                          earningsData.by_content.map((c) => (
-                            <tr key={c.content_id} className="border-t border-gray-50">
-                              <td className="px-4 py-2 font-bold text-gray-800">{c.name}</td>
-                              <td className="px-4 py-2 text-right">{c.units.toLocaleString("id-ID")}</td>
-                              <td className="px-4 py-2 text-right">{formatUsd(c.gross_usd)}</td>
-                              <td className="px-4 py-2 text-right">{formatUsd(c.net_usd)}</td>
-                              <td className="px-4 py-2 text-right">{c.split_pct}%</td>
-                              <td className="px-4 py-2 text-right font-black text-green-600">
-                                {formatUsd(c.share_usd)}
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <form
-                  onSubmit={handleRecordPayout}
-                  className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4 space-y-3"
-                >
-                  <h4 className="text-sm font-bold text-gray-800">Catat pembayaran</h4>
-                  <div>
-                    <label className="block">
-                      <span className="text-xs font-bold text-gray-500 uppercase">Periode</span>
-                      <select
-                        required
-                        disabled={!canRecordPayout}
-                        value={payoutForm.period_month}
-                        onChange={(e) => setPayoutForm((f) => ({ ...f, period_month: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
-                      >
-                        {periodOptions.length === 0 ? (
-                          <option value="">Tidak ada bulan yang bisa dibayar</option>
-                        ) : (
-                          periodOptions.map((m) => (
-                            <option key={m.month} value={m.month}>
-                              {periodOptionLabel(m)}
-                            </option>
-                          ))
-                        )}
-                      </select>
-                    </label>
-                    {selectedPeriod && (
-                      <div className="mt-2 rounded-xl border border-blue-100 bg-white px-3 py-2">
-                        <p className="mb-1 text-xs font-bold text-gray-500">
-                          Akan dicatat: bagian kreator {formatMonth(selectedPeriod.month)} per konten
-                        </p>
-                        <PayoutItemsTable
-                          items={selectedPeriod.items}
-                          totalUsd={selectedPeriod.share_usd}
-                          totalIdr={selectedPeriod.share_idr}
-                          idrRate={selectedPeriod.share_idr !== null ? earningsData.idr_rate : null}
-                        />
-                      </div>
+          ) : !earningsData ? (
+            <p className="text-sm font-bold text-blue-600">Memuat...</p>
+          ) : (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {(
+                  [
+                    ["Total diperoleh", earningsData.total_earned_usd, earningsData.total_earned_idr],
+                    ["Sudah dibayar", earningsData.total_paid_usd, earningsData.total_paid_idr],
+                    ["Saldo tertunda", earningsData.outstanding_usd, earningsData.outstanding_idr],
+                  ] as const
+                ).map(([label, usd, idr]) => (
+                  <div key={label} className="rounded-2xl bg-gray-50 p-4">
+                    <p className="text-xs font-bold uppercase text-gray-400">{label}</p>
+                    <p className="text-2xl font-black text-gray-900">{formatUsd(usd)}</p>
+                    {idr !== null && (
+                      <p className="text-xs font-bold text-gray-500">≈ {formatIDR(idr)}</p>
                     )}
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <label className="block">
-                      <span className="text-xs font-bold text-gray-500 uppercase">Tanggal bayar</span>
-                      <input
-                        type="date"
-                        required
-                        disabled={!canRecordPayout}
-                        value={payoutForm.paid_at}
-                        onChange={(e) => setPayoutForm((f) => ({ ...f, paid_at: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
-                      />
-                    </label>
-                    <label className="block">
-                      <span className="text-xs font-bold text-gray-500 uppercase">Catatan</span>
-                      <input
-                        type="text"
-                        disabled={!canRecordPayout}
-                        value={payoutForm.note}
-                        onChange={(e) => setPayoutForm((f) => ({ ...f, note: e.target.value }))}
-                        placeholder="Opsional, terlihat oleh kreator"
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
-                      />
-                    </label>
-                  </div>
-                  <p className="text-xs text-gray-500">
-                    Satu payout per bulan; jumlahnya dihitung otomatis dari bagian kreator di bulan
-                    itu. Hanya bulan yang sudah lengkap dan belum dibayar yang bisa dipilih (bulan
-                    berjalan belum). Payout bank/e-wallet dicatat juga dalam rupiah dengan kurs{" "}
-                    {formatIDR(earningsData.idr_rate)}/$.
-                  </p>
-                  {payoutPesan.text && (
-                    <div
-                      className={`rounded-xl p-3 text-sm font-bold ${PESAN_CLASS[payoutPesan.type] || PESAN_CLASS.success}`}
-                    >
-                      {payoutPesan.text}
-                    </div>
-                  )}
-                  <button
-                    type="submit"
-                    disabled={!canRecordPayout || savingPayout}
-                    className="bg-blue-600 text-white px-5 py-2 rounded-xl text-sm font-bold hover:bg-blue-700 transition disabled:opacity-50"
-                  >
-                    {savingPayout ? "Menyimpan..." : "Catat pembayaran"}
-                  </button>
-                </form>
+                ))}
+              </div>
 
-                <div>
-                  <h4 className="text-sm font-bold text-gray-800 mb-2">Riwayat payout</h4>
-                  <div className="rounded-2xl border border-gray-100 overflow-x-auto">
-                    <table className="w-full text-left text-sm">
-                      <thead className="bg-gray-50">
+              {!earningsData.payout_method && (
+                <div className="rounded-xl bg-amber-50 p-3 text-sm font-bold text-amber-700">
+                  Kreator ini belum mengisi metode payout, jadi pembayaran belum bisa dicatat.
+                  Minta kreator mengisinya di dashboard mereka.
+                </div>
+              )}
+              {earningsPanel.user.account_status !== "Active" && (
+                <div className="rounded-xl bg-amber-50 p-3 text-sm font-bold text-amber-700">
+                  Kreator nonaktif: pembayaran hanya bisa dicatat untuk kreator berstatus Active.
+                </div>
+              )}
+
+              {earningsData.payout_method && (
+                <div className="rounded-2xl border border-gray-100 p-4">
+                  <h4 className="text-sm font-bold text-gray-800 mb-2">Data payout</h4>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
+                    <dt className="text-gray-500">Metode</dt>
+                    <dd className="font-bold text-gray-900">
+                      {PAYOUT_METHOD_LABEL[earningsData.payout_method]}
+                    </dd>
+                    {PAYOUT_FIELDS[earningsData.payout_method].map((f) => (
+                      <Fragment key={f}>
+                        <dt className="text-gray-500">{PAYOUT_FIELD_LABEL[f]}</dt>
+                        <dd className="font-mono font-bold text-gray-900 select-all break-all">
+                          {earningsData.payout_details?.[f] || "-"}
+                        </dd>
+                      </Fragment>
+                    ))}
+                  </dl>
+                </div>
+              )}
+
+              <div>
+                <h4 className="text-sm font-bold text-gray-800 mb-2">Per konten (sejak rilis)</h4>
+                <div className="rounded-2xl border border-gray-100 overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Konten</th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                          Unit
+                        </th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                          Gross
+                        </th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                          Net
+                        </th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                          Split
+                        </th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                          Bagian kreator
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {earningsData.by_content.length === 0 ? (
                         <tr>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Periode</th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tanggal</th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
-                            Jumlah
-                          </th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
-                            Rupiah
-                          </th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tujuan</th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Catatan</th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Email & Drive</th>
-                          <th className="px-4 py-2" />
+                          <td colSpan={6} className="px-4 py-4 text-center text-gray-400 font-bold">
+                            Belum tertaut ke konten mana pun.
+                          </td>
                         </tr>
-                      </thead>
-                      <tbody>
-                        {earningsData.payouts.length === 0 ? (
-                          <tr>
-                            <td colSpan={8} className="px-4 py-4 text-center text-gray-400 font-bold">
-                              Belum ada payout.
+                      ) : (
+                        earningsData.by_content.map((c) => (
+                          <tr key={c.content_id} className="border-t border-gray-50">
+                            <td className="px-4 py-2 font-bold text-gray-800">{c.name}</td>
+                            <td className="px-4 py-2 text-right">{c.units.toLocaleString("id-ID")}</td>
+                            <td className="px-4 py-2 text-right">{formatUsd(c.gross_usd)}</td>
+                            <td className="px-4 py-2 text-right">{formatUsd(c.net_usd)}</td>
+                            <td className="px-4 py-2 text-right">{c.split_pct}%</td>
+                            <td className="px-4 py-2 text-right font-black text-green-600">
+                              {formatUsd(c.share_usd)}
                             </td>
                           </tr>
-                        ) : (
-                          earningsData.payouts.map((p) => (
-                            <tr key={p.id} className="border-t border-gray-50 align-top">
-                              <td className="px-4 py-2 whitespace-nowrap font-bold text-gray-800">
-                                {p.period_month ? formatMonth(p.period_month) : "-"}
-                              </td>
-                              <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
-                              <td className="px-4 py-2 text-right font-black text-gray-900">
-                                {formatUsd(p.amount_usd)}
-                              </td>
-                              <td className="px-4 py-2 text-right whitespace-nowrap">
-                                {p.amount_idr !== null ? (
-                                  <>
-                                    {formatIDR(p.amount_idr)}
-                                    {p.idr_rate !== null && (
-                                      <span className="block text-xs text-gray-400">
-                                        kurs {formatIDR(p.idr_rate)}/$
-                                      </span>
-                                    )}
-                                  </>
-                                ) : (
-                                  "-"
-                                )}
-                              </td>
-                              <td className="px-4 py-2">
-                                <span className="font-bold">
-                                  {PAYOUT_METHOD_LABEL[p.method] || p.method}
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <form
+                onSubmit={handleRecordPayout}
+                className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4 space-y-3"
+              >
+                <h4 className="text-sm font-bold text-gray-800">Catat pembayaran</h4>
+                <div>
+                  <label className="block">
+                    <span className="text-xs font-bold text-gray-500 uppercase">Periode</span>
+                    <select
+                      required
+                      disabled={!canRecordPayout}
+                      value={payoutForm.period_month}
+                      onChange={(e) => setPayoutForm((f) => ({ ...f, period_month: e.target.value }))}
+                      className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
+                    >
+                      {periodOptions.length === 0 ? (
+                        <option value="">Tidak ada bulan yang bisa dibayar</option>
+                      ) : (
+                        periodOptions.map((m) => (
+                          <option key={m.month} value={m.month}>
+                            {periodOptionLabel(m)}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  {selectedPeriod && (
+                    <div className="mt-2 rounded-xl border border-blue-100 bg-white px-3 py-2">
+                      <p className="mb-1 text-xs font-bold text-gray-500">
+                        Akan dicatat: bagian kreator {formatMonth(selectedPeriod.month)} per konten
+                      </p>
+                      <PayoutItemsTable
+                        items={selectedPeriod.items}
+                        totalUsd={selectedPeriod.share_usd}
+                        totalIdr={selectedPeriod.share_idr}
+                        idrRate={selectedPeriod.share_idr !== null ? earningsData.idr_rate : null}
+                      />
+                    </div>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="text-xs font-bold text-gray-500 uppercase">Tanggal bayar</span>
+                    <input
+                      type="date"
+                      required
+                      disabled={!canRecordPayout}
+                      value={payoutForm.paid_at}
+                      onChange={(e) => setPayoutForm((f) => ({ ...f, paid_at: e.target.value }))}
+                      className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs font-bold text-gray-500 uppercase">Catatan</span>
+                    <input
+                      type="text"
+                      disabled={!canRecordPayout}
+                      value={payoutForm.note}
+                      onChange={(e) => setPayoutForm((f) => ({ ...f, note: e.target.value }))}
+                      placeholder="Opsional, terlihat oleh kreator"
+                      className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
+                    />
+                  </label>
+                </div>
+                <p className="text-xs text-gray-500">
+                  Satu payout per bulan; jumlahnya dihitung otomatis dari bagian kreator di bulan
+                  itu. Hanya bulan yang sudah lengkap dan belum dibayar yang bisa dipilih (bulan
+                  berjalan belum). Payout bank/e-wallet dicatat juga dalam rupiah dengan kurs{" "}
+                  {formatIDR(earningsData.idr_rate)}/$.
+                </p>
+                {payoutPesan.text && (
+                  <div
+                    className={`rounded-xl p-3 text-sm font-bold ${PESAN_CLASS[payoutPesan.type] || PESAN_CLASS.success}`}
+                  >
+                    {payoutPesan.text}
+                  </div>
+                )}
+                <button
+                  type="submit"
+                  disabled={!canRecordPayout || savingPayout}
+                  className="bg-blue-600 text-white px-5 py-2 rounded-xl text-sm font-bold hover:bg-blue-700 transition disabled:opacity-50"
+                >
+                  {savingPayout ? "Menyimpan..." : "Catat pembayaran"}
+                </button>
+              </form>
+
+              <div>
+                <h4 className="text-sm font-bold text-gray-800 mb-2">Riwayat payout</h4>
+                <div className="rounded-2xl border border-gray-100 overflow-x-auto">
+                  <table className="w-full text-left text-sm">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Periode</th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tanggal</th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                          Jumlah
+                        </th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
+                          Rupiah
+                        </th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tujuan</th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Catatan</th>
+                        <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Email & Drive</th>
+                        <th className="px-4 py-2" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {earningsData.payouts.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-4 py-4 text-center text-gray-400 font-bold">
+                            Belum ada payout.
+                          </td>
+                        </tr>
+                      ) : (
+                        earningsData.payouts.map((p) => (
+                          <tr key={p.id} className="border-t border-gray-50 align-top">
+                            <td className="px-4 py-2 whitespace-nowrap font-bold text-gray-800">
+                              {p.period_month ? formatMonth(p.period_month) : "-"}
+                            </td>
+                            <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
+                            <td className="px-4 py-2 text-right font-black text-gray-900">
+                              {formatUsd(p.amount_usd)}
+                            </td>
+                            <td className="px-4 py-2 text-right whitespace-nowrap">
+                              {p.amount_idr !== null ? (
+                                <>
+                                  {formatIDR(p.amount_idr)}
+                                  {p.idr_rate !== null && (
+                                    <span className="block text-xs text-gray-400">
+                                      kurs {formatIDR(p.idr_rate)}/$
+                                    </span>
+                                  )}
+                                </>
+                              ) : (
+                                "-"
+                              )}
+                            </td>
+                            <td className="px-4 py-2">
+                              <span className="font-bold">
+                                {PAYOUT_METHOD_LABEL[p.method] || p.method}
+                              </span>
+                              <span className="block text-xs text-gray-500 break-all">
+                                {payoutDetailsText(p.method, p.details)}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
+                            <td className="px-4 py-2">
+                              {p.notified_at ? (
+                                <span
+                                  title={`Terkirim ${formatDateTime(p.notified_at)}`}
+                                  className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700"
+                                >
+                                  ✓ Email terkirim
                                 </span>
-                                <span className="block text-xs text-gray-500 break-all">
-                                  {payoutDetailsText(p.method, p.details)}
-                                </span>
-                              </td>
-                              <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
-                              <td className="px-4 py-2">
-                                {p.notified_at ? (
-                                  <span
-                                    title={`Terkirim ${formatDateTime(p.notified_at)}`}
-                                    className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700"
-                                  >
-                                    ✓ Email terkirim
+                              ) : (
+                                <div className="flex flex-col items-start gap-1">
+                                  <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
+                                    ✕ Email gagal
                                   </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResendPayoutEmail(p)}
+                                    disabled={notifyingPayoutId !== null}
+                                    className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
+                                  >
+                                    {notifyingPayoutId === p.id ? "Mengirim..." : "Kirim ulang email"}
+                                  </button>
+                                </div>
+                              )}
+                              <div className="mt-2 flex flex-col items-start gap-1">
+                                {p.drive_file_id ? (
+                                  <a
+                                    href={`https://drive.google.com/file/d/${encodeURIComponent(p.drive_file_id)}/view`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Buka slip di Google Drive"
+                                    className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700 hover:underline"
+                                  >
+                                    ✓ Drive: tersimpan
+                                  </a>
                                 ) : (
-                                  <div className="flex flex-col items-start gap-1">
+                                  <>
                                     <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
-                                      ✕ Email gagal
+                                      ✕ Drive: gagal
                                     </span>
                                     <button
                                       type="button"
-                                      onClick={() => handleResendPayoutEmail(p)}
-                                      disabled={notifyingPayoutId !== null}
+                                      onClick={() => handleRetryDriveUpload(p)}
+                                      disabled={uploadingDrivePayoutId !== null}
                                       className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
                                     >
-                                      {notifyingPayoutId === p.id ? "Mengirim..." : "Kirim ulang email"}
+                                      {uploadingDrivePayoutId === p.id ? "Mengupload..." : "Upload ulang"}
                                     </button>
-                                  </div>
+                                  </>
                                 )}
-                                <div className="mt-2 flex flex-col items-start gap-1">
-                                  {p.drive_file_id ? (
-                                    <a
-                                      href={`https://drive.google.com/file/d/${encodeURIComponent(p.drive_file_id)}/view`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      title="Buka slip di Google Drive"
-                                      className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700 hover:underline"
-                                    >
-                                      ✓ Drive: tersimpan
-                                    </a>
-                                  ) : (
-                                    <>
-                                      <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
-                                        ✕ Drive: gagal
-                                      </span>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleRetryDriveUpload(p)}
-                                        disabled={uploadingDrivePayoutId !== null}
-                                        className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
-                                      >
-                                        {uploadingDrivePayoutId === p.id ? "Mengupload..." : "Upload ulang"}
-                                      </button>
-                                    </>
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-4 py-2 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeletePayout(p)}
-                                  disabled={deletingPayoutId !== null}
-                                  className="bg-red-50 text-red-600 px-3 py-1 rounded-lg text-xs font-bold disabled:opacity-50"
-                                >
-                                  {deletingPayoutId === p.id ? "Menghapus..." : "Hapus"}
-                                </button>
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                              </div>
+                            </td>
+                            <td className="px-4 py-2 text-right">
+                              <button
+                                type="button"
+                                onClick={() => handleDeletePayout(p)}
+                                disabled={deletingPayoutId !== null}
+                                className="bg-red-50 text-red-600 px-3 py-1 rounded-lg text-xs font-bold disabled:opacity-50"
+                              >
+                                {deletingPayoutId === p.id ? "Menghapus..." : "Hapus"}
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
                 </div>
               </div>
-            )}
-          </div>
-        </div>
+            </div>
+          )}
+        </Modal>
       )}
 
       {/* MODAL ATUR SPLIT */}
       {splitEditor && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white p-8 rounded-3xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
-            <h3 className="text-xl font-bold mb-1">Atur Split</h3>
-            <p className="text-sm text-gray-500 mb-6">{splitEditor.content.name}</p>
-
-            {droppedSplits.length > 0 && (
-              <div className="mb-4 rounded-xl bg-amber-50 p-3 text-xs font-bold text-amber-700">
-                Split untuk kreator yang tidak aktif akan dihapus saat disimpan:{" "}
-                {droppedSplits.map((s) => `${s.user_name} (${s.split_percentage}%)`).join(", ")}.
-              </div>
-            )}
-
-            {splitEditor.rows.length === 0 ? (
-              <p className="text-sm text-gray-400 font-bold">Belum ada kreator aktif.</p>
-            ) : (
-              <div className="space-y-2">
-                {splitEditor.rows.map((r) => (
-                  <label
-                    key={r.user_id}
-                    className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${r.checked ? "border-blue-200 bg-blue-50/50" : "border-gray-100"}`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={r.checked}
-                      onChange={(e) => updateSplitRow(r.user_id, { checked: e.target.checked })}
-                      className="h-4 w-4"
-                    />
-                    <span className="flex-1 text-sm font-bold text-gray-800">{r.name}</span>
-                    <input
-                      type="number"
-                      min="0"
-                      max={MAX_CREATOR_SPLIT}
-                      step="0.1"
-                      disabled={!r.checked}
-                      value={r.percentage}
-                      onChange={(e) => updateSplitRow(r.user_id, { percentage: e.target.value })}
-                      className="w-20 rounded-lg border border-gray-300 px-2 py-1 text-sm font-bold text-green-600 disabled:bg-gray-50 disabled:text-gray-300"
-                    />
-                    <span className="text-sm text-gray-500">%</span>
-                  </label>
-                ))}
-              </div>
-            )}
-
-            <div className="mt-6 space-y-1 border-t pt-4 text-sm">
-              <div className="flex justify-between font-bold">
-                <span className="text-gray-600">Total kreator</span>
-                <span className={overLimit ? "text-red-600" : "text-gray-900"}>
-                  {splitTotal}% / {MAX_CREATOR_SPLIT}%
-                </span>
-              </div>
-              <div className="flex justify-between font-bold">
-                <span className="text-gray-600">Squareclouds</span>
-                <span className="text-blue-600">{roundPct(100 - splitTotal)}%</span>
-              </div>
-              {overLimit && (
-                <p className="text-xs font-bold text-red-600">
-                  Total kreator melebihi {MAX_CREATOR_SPLIT}%. Kurangi persentasenya.
-                </p>
-              )}
-            </div>
-
-            {splitError && (
-              <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">
-                {splitError}
-              </div>
-            )}
-
-            <div className="flex gap-3 pt-4 border-t mt-6">
+        <Modal
+          title="Atur Split"
+          subtitle={splitEditor.content.name}
+          onClose={() => setSplitEditor(null)}
+          isProcessing={savingSplits}
+          width="max-w-lg"
+          footer={
+            <div className="flex gap-3">
               <button
                 type="button"
                 onClick={handleSaveSplits}
@@ -1777,14 +1737,80 @@ export default function AdminDashboard() {
               <button
                 type="button"
                 onClick={() => setSplitEditor(null)}
-                className="px-4 py-2.5 rounded-xl font-bold bg-gray-100 hover:bg-gray-200 transition"
+                disabled={savingSplits}
+                className="px-4 py-2.5 rounded-xl font-bold bg-gray-100 hover:bg-gray-200 transition disabled:opacity-50"
               >
                 Batal
               </button>
             </div>
+          }
+        >
+          {droppedSplits.length > 0 && (
+            <div className="mb-4 rounded-xl bg-amber-50 p-3 text-xs font-bold text-amber-700">
+              Split untuk kreator yang tidak aktif akan dihapus saat disimpan:{" "}
+              {droppedSplits.map((s) => `${s.user_name} (${s.split_percentage}%)`).join(", ")}.
+            </div>
+          )}
+
+          {splitEditor.rows.length === 0 ? (
+            <p className="text-sm text-gray-400 font-bold">Belum ada kreator aktif.</p>
+          ) : (
+            <div className="space-y-2">
+              {splitEditor.rows.map((r) => (
+                <label
+                  key={r.user_id}
+                  className={`flex items-center gap-3 rounded-xl border px-3 py-2 ${r.checked ? "border-blue-200 bg-blue-50/50" : "border-gray-100"}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={r.checked}
+                    onChange={(e) => updateSplitRow(r.user_id, { checked: e.target.checked })}
+                    className="h-4 w-4"
+                  />
+                  <span className="flex-1 text-sm font-bold text-gray-800">{r.name}</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max={MAX_CREATOR_SPLIT}
+                    step="0.1"
+                    disabled={!r.checked}
+                    value={r.percentage}
+                    onChange={(e) => updateSplitRow(r.user_id, { percentage: e.target.value })}
+                    className="w-20 rounded-lg border border-gray-300 px-2 py-1 text-sm font-bold text-green-600 disabled:bg-gray-50 disabled:text-gray-300"
+                  />
+                  <span className="text-sm text-gray-500">%</span>
+                </label>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-6 space-y-1 border-t pt-4 text-sm">
+            <div className="flex justify-between font-bold">
+              <span className="text-gray-600">Total kreator</span>
+              <span className={overLimit ? "text-red-600" : "text-gray-900"}>
+                {splitTotal}% / {MAX_CREATOR_SPLIT}%
+              </span>
+            </div>
+            <div className="flex justify-between font-bold">
+              <span className="text-gray-600">Squareclouds</span>
+              <span className="text-blue-600">{roundPct(100 - splitTotal)}%</span>
+            </div>
+            {overLimit && (
+              <p className="text-xs font-bold text-red-600">
+                Total kreator melebihi {MAX_CREATOR_SPLIT}%. Kurangi persentasenya.
+              </p>
+            )}
           </div>
-        </div>
+
+          {splitError && (
+            <div className="mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">
+              {splitError}
+            </div>
+          )}
+        </Modal>
       )}
+
+      {confirmDialog}
     </div>
   );
 }
