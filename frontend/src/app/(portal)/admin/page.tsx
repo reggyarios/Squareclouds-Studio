@@ -75,6 +75,8 @@ type Payout = {
   created_at: string;
   // Waktu email notifikasi terkirim; null = gagal / belum terkirim.
   notified_at: string | null;
+  // File ID slip di Google Drive; null = belum tersimpan (upload ulang).
+  drive_file_id: string | null;
 };
 
 // Respons /users/{id}/earnings (creator_summary versi admin).
@@ -247,6 +249,7 @@ export default function AdminDashboard() {
   const [savingPayout, setSavingPayout] = useState(false);
   const [deletingPayoutId, setDeletingPayoutId] = useState<number | null>(null);
   const [notifyingPayoutId, setNotifyingPayoutId] = useState<number | null>(null);
+  const [uploadingDrivePayoutId, setUploadingDrivePayoutId] = useState<number | null>(null);
   const [payoutPesan, setPayoutPesan] = useState({ type: "", text: "" });
 
   const [pesan, setPesan] = useState({ type: "", text: "" });
@@ -519,12 +522,32 @@ export default function AdminDashboard() {
         }),
       });
       // Payout tetap tercatat walau email notifikasinya gagal.
-      setPayoutPesan({ type: data.notified ? "success" : "warning", text: data.message });
+      // Payout tetap tercatat walau email atau arsip Drive-nya gagal.
+      setPayoutPesan({
+        type: data.notified && data.drive_saved ? "success" : "warning",
+        text: data.message,
+      });
       await loadEarnings(user);
     } catch (err) {
       setPayoutPesan({ type: "error", text: errMsg(err) });
     } finally {
       setSavingPayout(false);
+    }
+  };
+
+  const handleRetryDriveUpload = async (p: Payout) => {
+    if (!earningsPanel) return;
+    const { user } = earningsPanel;
+    setUploadingDrivePayoutId(p.id);
+    setPayoutPesan({ type: "", text: "" });
+    try {
+      const data = await api(`/payouts/${p.id}/drive`, { method: "POST" });
+      setPayoutPesan({ type: "success", text: data.message });
+      await loadEarnings(user);
+    } catch (err) {
+      setPayoutPesan({ type: "error", text: errMsg(err) });
+    } finally {
+      setUploadingDrivePayoutId(null);
     }
   };
 
@@ -1554,7 +1577,7 @@ export default function AdminDashboard() {
                           </th>
                           <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tujuan</th>
                           <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Catatan</th>
-                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Email</th>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Email & Drive</th>
                           <th className="px-4 py-2" />
                         </tr>
                       </thead>
@@ -1621,6 +1644,33 @@ export default function AdminDashboard() {
                                     </button>
                                   </div>
                                 )}
+                                <div className="mt-2 flex flex-col items-start gap-1">
+                                  {p.drive_file_id ? (
+                                    <a
+                                      href={`https://drive.google.com/file/d/${encodeURIComponent(p.drive_file_id)}/view`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title="Buka slip di Google Drive"
+                                      className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700 hover:underline"
+                                    >
+                                      ✓ Drive: tersimpan
+                                    </a>
+                                  ) : (
+                                    <>
+                                      <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
+                                        ✕ Drive: gagal
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleRetryDriveUpload(p)}
+                                        disabled={uploadingDrivePayoutId !== null}
+                                        className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
+                                      >
+                                        {uploadingDrivePayoutId === p.id ? "Mengupload..." : "Upload ulang"}
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
                               </td>
                               <td className="px-4 py-2 text-right">
                                 <button
