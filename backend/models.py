@@ -443,6 +443,10 @@ class Payout(Base):
     # Snapshot kurs saat dibayar
     idr_rate = Column(Float, nullable=True)
 
+    # Snapshot fee PayPal (%) saat dibayar, untuk label "PayPal Fee x%" di slip
+    # yang dibuat ulang belakangan. NULL = payout lama.
+    paypal_fee_pct = Column(Float, nullable=True)
+
     # Hanya untuk payout non-PayPal
     amount_idr = Column(Float, nullable=True)
 
@@ -518,6 +522,12 @@ class PayoutItem(Base):
     content_name = Column(String, nullable=False)
 
     units = Column(Integer, nullable=False)
+
+    # Rantai perhitungan untuk slip PDF (snapshot, 2 desimal): net80 = yang
+    # diterima dari Pathway ("Total Revenues"), net = net80 setelah fee PayPal.
+    # NULL = item lama sebelum kolom ini ada (slip hanya menampilkan total).
+    net80_usd = Column(Float, nullable=True)
+    net_usd = Column(Float, nullable=True)
 
     share_usd = Column(Float, nullable=False)
 

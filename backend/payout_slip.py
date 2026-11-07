@@ -2,10 +2,11 @@
 hanya kopnya yang berbeda.
 
 Modul ini hanya tata letak: semua teks sudah diformat pemanggil
-(main.payout_slip_pdf). Slip dikirim ke kreator, jadi isinya hanya bagian
-kreator per konten. Tidak ada unit, gross, net, fee PayPal, split %, bagian
-Squareclouds, maupun potongan apa pun; jangan tambahkan field seperti itu ke
-SlipData.
+(main.payout_slip_pdf). Per konten slip menampilkan rantai perhitungan
+seperti slip Pathway: Total Revenues (net80, sudah dipotong Pathway 20%),
+PayPal Fee, Creator Split, Product Total. Aturan "kreator tidak melihat net"
+hanya untuk dashboard/API kreator, tidak untuk slip ini. Gross dan bagian
+Squareclouds tetap tidak pernah ditampilkan sebagai baris.
 
 Label berbahasa Inggris (seperti slip Pathway); tanggal dan nama bulan tetap
 format Indonesia. Font Helvetica bawaan reportlab, A4, margin 40pt.
@@ -36,10 +37,21 @@ from reportlab.platypus import (
 # Salinan frontend/public/FLBT.png (logo dengan tulisan), diperkecil.
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "logo.png"
 LOGO_HEIGHT = 22 * mm
-# Lebih dari ini, tabel lanjut ke halaman berikut dengan header diulang.
-ITEMS_PER_PAGE = 30
-COMMENT = "Creator Earnings"
+# Lebih dari ini (baris tabel), tabel lanjut ke halaman berikut dengan header
+# diulang. Blok satu konten tidak pernah dipecah ke dua halaman.
+ROWS_PER_PAGE = 30
 NO_ITEMS = "No per-content breakdown is available for this payout."
+
+
+@dataclass
+class SlipItem:
+    """Blok satu konten di tabel."""
+    content: str                    # "Royal Mansion (1.585 units)"
+    # Baris (Comment, Price) sebelum Product Total, mis. [("Total Revenues",
+    # "$950.99"), ("PayPal Fee 5.00%", "-$47.55"), ("Creator Split 20.00%",
+    # "$180.69")]. Kosong = item lama tanpa rantai perhitungan.
+    lines: list[tuple[str, str]]
+    product_total: str              # "$180.69" = share_usd
 
 
 @dataclass
@@ -49,11 +61,15 @@ class SlipData:
     revenue_month: str              # "Agustus 2026"; "-" untuk payout lama
     sender: list[str]               # kiri: nama studio, email, alamat (maks 3 baris)
     recipient: list[str]            # kanan: nama, "<username> - Squareclouds Studio", email
-    items: list[tuple[str, str]]    # (konten, "$22.80"); kosong = payout lama tanpa rincian
-    total_usd: str                  # Subtotal = Total (tidak ada potongan)
+    items: list[SlipItem]           # kosong = payout lama tanpa rincian
+    total_usd: str                  # Subtotal = Total = Σ Product Total
     exchange_rate: str | None       # "Rp16.500,00/$", hanya payout non-PayPal
     total_idr: str | None
     note: str | None
+
+
+def _block_rows(item: SlipItem) -> int:
+    return len(item.lines) + 1
 
 
 INK = colors.HexColor("#333333")
@@ -120,7 +136,19 @@ def _identity(data: SlipData) -> Table:
     return _layout_table([[sender, recipient]], [CONTENT_WIDTH / 2] * 2)
 
 
-def _items_table(start: int, chunk: list[tuple[str, str]]) -> Table:
+def _chunks(items: list[SlipItem]) -> list[list[SlipItem]]:
+    """Bagi blok konten per halaman: maksimal ROWS_PER_PAGE baris, blok utuh."""
+    chunks, current, rows = [], [], 0
+    for item in items:
+        if current and rows + _block_rows(item) > ROWS_PER_PAGE:
+            chunks.append(current)
+            current, rows = [], 0
+        current.append(item)
+        rows += _block_rows(item)
+    return chunks + [current] if current else chunks or [[]]
+
+
+def _items_table(chunk: list[SlipItem]) -> Table:
     rows = [[_p("Content", BOLD), _p("Comment", CENTER_BOLD), _p("Price", RIGHT_BOLD)]]
     style = [
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -129,18 +157,25 @@ def _items_table(start: int, chunk: list[tuple[str, str]]) -> Table:
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-        ("LINEBELOW", (0, -1), (-1, -1), 0.5, LINE),
     ]
-    if chunk:
-        for offset, (name, amount) in enumerate(chunk):
-            rows.append([_p(name), _p(COMMENT, CENTER), _p(amount, RIGHT)])
-            # Selang-seling dihitung dari nomor item global, jadi tetap
-            # berurutan di halaman berikutnya.
-            if (start + offset) % 2 == 1:
-                style.append(("BACKGROUND", (0, len(rows) - 1), (-1, len(rows) - 1), ALT_BG))
-    else:
+    for item in chunk:
+        first = len(rows)
+        # Baris pertama blok berlatar abu muda (seperti Pathway): nama konten
+        # + baris pertama rantai (atau langsung Product Total untuk item lama).
+        for index, (comment, price) in enumerate(item.lines):
+            rows.append([_p(item.content) if index == 0 else "", _p(comment, CENTER), _p(price, RIGHT)])
+        rows.append([
+            "" if item.lines else _p(item.content),
+            _p("Product Total", CENTER_BOLD),
+            _p(item.product_total, RIGHT_BOLD),
+        ])
+        style += [
+            ("BACKGROUND", (0, first), (-1, first), ALT_BG),
+            ("LINEBELOW", (0, len(rows) - 1), (-1, len(rows) - 1), 0.5, LINE),
+        ]
+    if not chunk:
         rows.append([_p(NO_ITEMS, MUTED_TEXT), "", ""])
-        style.append(("SPAN", (0, 1), (-1, 1)))
+        style += [("SPAN", (0, 1), (-1, 1)), ("LINEBELOW", (0, 1), (-1, 1), 0.5, LINE)]
     # repeatRows: kalau satu potongan tetap tidak muat (nama konten panjang
     # yang terlipat), reportlab memecahnya dan mengulang header.
     table = Table(rows, colWidths=COL_WIDTHS, repeatRows=1)
@@ -178,11 +213,10 @@ def render(data: SlipData) -> bytes:
         creator="Creator Portal Squareclouds Studio",
     )
     story = [_header(data), Spacer(1, 9 * mm), _identity(data), Spacer(1, 9 * mm)]
-    chunks = [data.items[i:i + ITEMS_PER_PAGE] for i in range(0, len(data.items), ITEMS_PER_PAGE)] or [[]]
-    for index, chunk in enumerate(chunks):
+    for index, chunk in enumerate(_chunks(data.items)):
         if index:
             story.append(PageBreak())
-        story.append(_items_table(index * ITEMS_PER_PAGE, chunk))
+        story.append(_items_table(chunk))
     story.append(_totals(data))
     if data.note:
         story += [Spacer(1, 6 * mm), _p(f"Note: {data.note}", SMALL)]

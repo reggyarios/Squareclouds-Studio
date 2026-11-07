@@ -332,8 +332,10 @@ def creator_months(db: Session, user: models.User) -> list[dict]:
     yang dicatat.
 
     items = rincian per konten yang terjual di bulan itu, urut nama:
-    {content_id, name, units, share_usd}. Σ items.share_usd = share_usd persis
-    (allocate_cents); disalin ke payout_items saat payout dicatat.
+    {content_id, name, units, net80_usd, net_usd, split_pct, share_usd}.
+    Σ items.share_usd = share_usd persis (allocate_cents); disalin ke
+    payout_items saat payout dicatat (rantai perhitungan di slip PDF). Berisi
+    net & split %, jadi hanya untuk admin, tidak pernah untuk respons kreator.
     """
     last_complete = last_complete_month(db)
     if last_complete is None:
@@ -347,8 +349,8 @@ def creator_months(db: Session, user: models.User) -> list[dict]:
             .filter(models.CreatorSplit.user_id == user.id)
         )
     }
-    # {month: {content_id: {content_id, name, units, share}}}; content_rows
-    # memberi satu baris per (konten, bulan).
+    # {month: {content_id: {...}}}; content_rows memberi satu baris per
+    # (konten, bulan).
     totals = {}
     for row in content_rows(db, user_id=user.id):
         if row["month"] > last_complete:
@@ -358,6 +360,9 @@ def creator_months(db: Session, user: models.User) -> list[dict]:
             "content_id": row["content_id"],
             "name": name,
             "units": row["units"],
+            "net80": row["net80_usd"],
+            "net": row["net_usd"],
+            "split_pct": pct,
             "share": creator_share(row["net_usd"], pct),
         }
 
@@ -365,7 +370,15 @@ def creator_months(db: Session, user: models.User) -> list[dict]:
         contents = sorted(totals.get(month, {}).values(), key=lambda c: (c["name"].lower(), c["content_id"]))
         amounts = allocate_cents([c["share"] for c in contents])
         return [
-            {"content_id": c["content_id"], "name": c["name"], "units": c["units"], "share_usd": amount}
+            {
+                "content_id": c["content_id"],
+                "name": c["name"],
+                "units": c["units"],
+                "net80_usd": money(c["net80"]),
+                "net_usd": money(c["net"]),
+                "split_pct": c["split_pct"],
+                "share_usd": amount,
+            }
             for c, amount in zip(contents, amounts)
         ]
 

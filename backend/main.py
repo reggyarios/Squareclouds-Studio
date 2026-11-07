@@ -987,12 +987,44 @@ def slip_address_lines(address: str) -> list[str]:
     return lines
 
 
+def format_count(value: int) -> str:
+    """1585 -> "1.585" (pemisah ribuan Indonesia)."""
+    return f"{value:,}".replace(",", ".")
+
+
+def slip_items(payout: models.Payout, fee_pct: float) -> list[payout_slip.SlipItem]:
+    """Blok per konten seperti slip Pathway, dari snapshot payout_items:
+    Total Revenues (net80) → PayPal Fee (dilewati kalau fee 0) → Creator Split
+    → Product Total (= share_usd). Item lama tanpa net80/net hanya punya
+    Product Total."""
+    blocks = []
+    for item in payout.items:
+        share = earnings.format_usd(item.share_usd)
+        lines = []
+        if item.net80_usd is not None and item.net_usd is not None:
+            lines.append(("Total Revenues", earnings.format_usd(item.net80_usd)))
+            if fee_pct:
+                fee = earnings.money(item.net80_usd - item.net_usd)
+                lines.append((f"PayPal Fee {fee_pct:.2f}%", f"-{earnings.format_usd(fee)}"))
+            # Nominalnya share_usd (bukan net × split dibulatkan ulang) supaya
+            # selalu sama dengan Product Total dan Subtotal.
+            lines.append((f"Creator Split {item.split_pct:.2f}%", share))
+        blocks.append(payout_slip.SlipItem(
+            content=f"{item.content_name} ({format_count(item.units)} units)",
+            lines=lines,
+            product_total=share,
+        ))
+    return blocks
+
+
 def payout_slip_pdf(db: Session, user: models.User, payout: models.Payout) -> bytes:
     """Slip PDF di memori (tidak pernah ditulis ke disk/DB); dibuat ulang tiap
     kali dikirim: payout baru, kirim ulang email, upload ulang ke Drive.
-    Hanya bagian kreator per konten; unit, gross/net/fee/split, dan bagian
-    Squareclouds tidak pernah masuk slip."""
+    Per konten menampilkan rantai net80 → fee PayPal → split → bagian kreator
+    (lihat slip_items). Gross dan bagian Squareclouds tidak pernah masuk slip."""
     show_idr = payout_shows_idr(payout)
+    # Fee saat payout dicatat; payout lama tanpa snapshot memakai setting kini.
+    fee_pct = payout.paypal_fee_pct if payout.paypal_fee_pct is not None else earnings.paypal_fee_pct(db)
     return payout_slip.render(payout_slip.SlipData(
         title=payout_slip_filename(user, payout).removesuffix(".pdf"),
         created_on=format_date_id(payout.paid_at),
@@ -1008,7 +1040,7 @@ def payout_slip_pdf(db: Session, user: models.User, payout: models.Payout) -> by
             )
             if line
         ],
-        items=[(i.content_name, earnings.format_usd(i.share_usd)) for i in payout.items],
+        items=slip_items(payout, fee_pct),
         total_usd=earnings.format_usd(payout.amount_usd),
         exchange_rate=f"{earnings.format_idr(payout.idr_rate)}/$" if show_idr else None,
         total_idr=earnings.format_idr(payout.amount_idr) if show_idr else None,
@@ -1190,6 +1222,8 @@ def create_payout(
         idr_rate=earnings.idr_rate(db),
         # None untuk PayPal (creator_months hanya mengisinya untuk bank/e-wallet).
         amount_idr=month["share_idr"],
+        # Fee yang sama dengan yang dipakai creator_months di atas (net_usd).
+        paypal_fee_pct=earnings.paypal_fee_pct(db),
         method=user.payout_method,
         details=user.payout_details or "{}",
         note=(payload.note or "").strip() or None,
@@ -1197,18 +1231,17 @@ def create_payout(
         created_by=current_user.id,
         created_at=iso_utc(datetime.now(timezone.utc)),
     )
-    # Rincian per konten disalin dari bulan itu; Σ share_usd = amount_usd.
-    splits = dict(
-        db.query(models.CreatorSplit.content_id, models.CreatorSplit.split_percentage)
-        .filter(models.CreatorSplit.user_id == user.id)
-    )
+    # Rincian per konten (termasuk rantai net80 → net → split untuk slip)
+    # disalin dari bulan itu; Σ share_usd = amount_usd.
     payout.items = [
         models.PayoutItem(
             content_id=item["content_id"],
             content_name=item["name"],
             units=item["units"],
+            net80_usd=item["net80_usd"],
+            net_usd=item["net_usd"],
+            split_pct=item["split_pct"],
             share_usd=item["share_usd"],
-            split_pct=splits[item["content_id"]],
         )
         for item in month["items"]
     ]

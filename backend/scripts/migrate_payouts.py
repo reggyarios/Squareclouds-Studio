@@ -34,12 +34,16 @@ Tabel baru:
                                  tetap NULL (tanpa periode)
                   drive_file_id  file ID slip PDF di Google Drive; NULL =
                                  belum tersimpan (bisa diupload ulang admin)
+                  paypal_fee_pct snapshot fee PayPal (%) untuk slip; NULL =
+                                 payout lama
                 plus unique index uq_payouts_user_period (user_id,
                 period_month): satu payout per kreator per bulan
     payout_items
                 rincian payout per konten (snapshot nama, unit, bagian, split),
                 ON DELETE CASCADE dari payouts. Payout yang dicatat sebelum
-                tabel ini ada tidak punya rincian.
+                tabel ini ada tidak punya rincian. Kalau tabelnya sudah ada,
+                kolom net80_usd dan net_usd (rantai perhitungan di slip)
+                ikut ditambahkan; item lama tetap NULL.
 """
 import sys
 from datetime import datetime, timezone
@@ -109,6 +113,11 @@ with engine.begin() as conn:
     print(f"{'payouts.period_month':32} ok")
     conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "drive_file_id" VARCHAR'))
     print(f"{'payouts.drive_file_id':32} ok")
+    conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "paypal_fee_pct" DOUBLE PRECISION'))
+    print(f"{'payouts.paypal_fee_pct':32} ok")
+    for name in ("net80_usd", "net_usd"):
+        conn.execute(text(f'ALTER TABLE payout_items ADD COLUMN IF NOT EXISTS "{name}" DOUBLE PRECISION'))
+        print(f"{'payout_items.' + name:32} ok")
     # Nama sama dengan Index di models.Payout, jadi DB baru (create_all di
     # atas) dilewati di sini. NULL tidak bentrok: payout lama boleh banyak.
     conn.execute(

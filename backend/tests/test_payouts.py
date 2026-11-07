@@ -301,19 +301,20 @@ def test_creator_months_from_first_earning_to_last_complete_month(client):
         ])
         july = add_payout(db, creator, 22.8, period_month="2026-07")
 
-        def items(units, share):
-            return [{"content_id": content.id, "name": "Royal Mansion", "units": units, "share_usd": share}]
+        def items(units, net80, net, share):
+            return [{"content_id": content.id, "name": "Royal Mansion", "units": units,
+                     "net80_usd": net80, "net_usd": net, "split_pct": 30, "share_usd": share}]
 
         months = earnings.creator_months(db, creator)
         assert months == [
             {"month": "2026-07", "units": 10, "share_usd": 22.8, "share_idr": 376200.0, "paid": True,
-             "payout_id": july.id, "items": items(10, 22.8)},
+             "payout_id": july.id, "items": items(10, 80.0, 76.0, 22.8)},
             {"month": "2026-08", "units": 0, "share_usd": 0.0, "share_idr": 0.0, "paid": False,
              "payout_id": None, "items": []},
             {"month": "2026-09", "units": 5, "share_usd": 11.4, "share_idr": 188100.0, "paid": False,
-             "payout_id": None, "items": items(5, 11.4)},
+             "payout_id": None, "items": items(5, 40.0, 38.0, 11.4)},
             {"month": "2026-10", "units": 1, "share_usd": 2.28, "share_idr": 37620.0, "paid": False,
-             "payout_id": None, "items": items(1, 2.28)},
+             "payout_id": None, "items": items(1, 8.0, 7.6, 2.28)},
         ]
 
         for method in ("paypal", None):
@@ -359,8 +360,10 @@ def test_creator_months_items_per_content(client):
         assert october["share_usd"] == 0.57
         assert october["units"] == 2
         assert october["items"] == [
-            {"content_id": a.id, "name": "Konten A", "units": 1, "share_usd": 0.29},
-            {"content_id": b.id, "name": "Konten B", "units": 1, "share_usd": 0.28},
+            {"content_id": a.id, "name": "Konten A", "units": 1,
+             "net80_usd": 1.0, "net_usd": 0.95, "split_pct": 30, "share_usd": 0.29},
+            {"content_id": b.id, "name": "Konten B", "units": 1,
+             "net80_usd": 1.0, "net_usd": 0.95, "split_pct": 30, "share_usd": 0.28},
         ]
 
 
@@ -502,7 +505,8 @@ def test_user_earnings_has_internal_fields_and_full_details(client, admin_header
     content_id = data["by_content"][0]["content_id"]
     assert data["months"] == [
         {"month": "2026-10", "units": 10, "share_usd": 22.8, "share_idr": 376200.0, "paid": False, "payout_id": None,
-         "items": [{"content_id": content_id, "name": "Royal Mansion", "units": 10, "share_usd": 22.8}]}
+         "items": [{"content_id": content_id, "name": "Royal Mansion", "units": 10,
+                    "net80_usd": 80.0, "net_usd": 76.0, "split_pct": 30, "share_usd": 22.8}]}
     ]
 
     with SessionLocal() as db:
@@ -718,9 +722,10 @@ def test_payout_items_saved_and_sum_to_amount(client, admin_headers):
     with SessionLocal() as db:
         payout = db.get(models.Payout, payout_id)
         assert payout.amount_usd == 0.57
-        rows = [(i.content_name, i.units, i.share_usd, i.split_pct) for i in payout.items]
-        assert rows == [("Konten A", 1, 0.29, 30.0), ("Konten B", 1, 0.28, 30.0)]
+        rows = [(i.content_name, i.units, i.net80_usd, i.net_usd, i.split_pct, i.share_usd) for i in payout.items]
+        assert rows == [("Konten A", 1, 1.0, 0.95, 30.0, 0.29), ("Konten B", 1, 1.0, 0.95, 30.0, 0.28)]
         assert round(sum(i.share_usd for i in payout.items), 2) == payout.amount_usd
+        assert payout.paypal_fee_pct == 5.0
         content_ids = {c.name: c.id for c in db.query(models.Content)}
         assert [i.content_id for i in payout.items] == [content_ids["Konten A"], content_ids["Konten B"]]
 
@@ -1111,10 +1116,11 @@ def test_resend_payout_email(client, admin_headers, monkeypatch):
 # SLIP PAYOUT PDF
 # ============================================================================
 
-# Tidak boleh ada di slip kreator (huruf kecil, dicek sebagai substring).
+# Tidak boleh ada di slip kreator (huruf kecil, dicek sebagai substring). Net
+# boleh tampil di slip (rantai perhitungan seperti Pathway), tapi gross dan
+# bagian Squareclouds tidak pernah.
 FORBIDDEN_SLIP_WORDS = (
-    "gross", "net", "fee", "split", "bagian squareclouds", "squareclouds share",
-    "units", "total revenues", "slip no", "this slip is generated",
+    "gross", "bagian squareclouds", "squareclouds share", "slip no", "this slip is generated", "creator earnings",
 )
 # Satu-satunya "@" yang boleh ada di slip: email pengirim dan email penerima
 # (keduanya memang bagian blok identitas). "@username" tidak boleh.
@@ -1156,16 +1162,30 @@ def sent_slip(outbox):
     return filename, pdf_text(data)
 
 
+def regenerate_slip(payout_id):
+    """Teks slip yang dibuat ulang sekarang (seperti saat kirim ulang email / upload ulang Drive)."""
+    import main
+
+    with SessionLocal() as db:
+        payout = db.get(models.Payout, payout_id)
+        return pdf_text(main.payout_slip_pdf(db, db.get(models.User, payout.user_id), payout))
+
+
+def item_shares(payout_id):
+    with SessionLocal() as db:
+        return [earnings.format_usd(i.share_usd) for i in db.get(models.Payout, payout_id).items]
+
+
 def test_payout_slip_content(client, admin_headers, outbox):
     creator_id = seed_creator(method="bank", details=BANK)
-    post_payout(client, admin_headers, creator_id, note="Terima kasih", paid_at="2026-11-03")
+    res = post_payout(client, admin_headers, creator_id, note="Terima kasih", paid_at="2026-11-03")
+    payout_id = res.json()["data"]["id"]
 
     filename, text = sent_slip(outbox)
     assert filename == "Payout Slip - kreator - Oktober 2026.pdf"
     for part in (
         "Created On: 3 November 2026",
         "Revenue Month: Oktober 2026",
-        "Creator Earnings",
         "Subtotal: $22.80",
         "Total: $22.80",
         "Exchange Rate: Rp16.500,00/$",
@@ -1183,28 +1203,100 @@ def test_payout_slip_content(client, admin_headers, outbox):
     ])
     # Kanan: nama, "<username> - Squareclouds Studio", email.
     assert_consecutive_lines(text, ["Kreator", "kreator - Squareclouds Studio", "creator@example.com"])
-    # Tabel: Content | Comment | Price, satu baris per konten.
-    assert_consecutive_lines(text, ["Content", "Comment", "Price", "Royal Mansion", "Creator Earnings", "$22.80"])
+    # Rantai per konten: net80 80 → fee 5% (4) → net 76 × split 30% = 22,8.
+    assert_consecutive_lines(text, [
+        "Content", "Comment", "Price",
+        "Royal Mansion (10 units)", "Total Revenues", "$80.00",
+        "PayPal Fee 5.00%", "-$4.00",
+        "Creator Split 30.00%", "$22.80",
+        "Product Total", "$22.80",
+    ])
+    assert item_shares(payout_id) == ["$22.80"]  # Product Total = share_usd
 
     assert_no_internal_money(text)
     assert_no_at_sign_outside_emails(text)
-    # Tujuan payout, nomor slip, dan footer tidak lagi ada di slip.
     for absent in ("Transfer bank", "BCA", BANK["account_number"], "PO-", "Squareclouds Studio Creator"):
         assert absent not in text, absent
 
 
-def test_payout_slip_one_row_per_content(client, admin_headers, outbox):
-    creator_id = seed_two_content_creator()
-    post_payout(client, admin_headers, creator_id)
+def test_payout_slip_matches_pathway_example(client, admin_headers, outbox):
+    # Contoh slip: 1.585 unit, Total Revenues (net80) $950,99, fee 5%, split 20%.
+    with SessionLocal() as db:
+        creator = add_creator(db, username="kreator", payout_method="paypal",
+                              payout_details=json.dumps({"paypal_email": "k@pp.com"}))
+        add_content(db, splits=[(creator, 20)], sales=[("2026-10-05", 1585, 1188.74, 950.99)])
+        add_content(db, "Konten Tanpa Kreator", sales=[("2026-11-05", 1, 1.0, 0.8)])
+        db.commit()
+        creator_id = creator.id
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+
     _, text = sent_slip(outbox)
     assert_consecutive_lines(text, [
-        "Konten A", "Creator Earnings", "$0.29",
-        "Konten B", "Creator Earnings", "$0.28",
+        "Royal Mansion (1.585 units)", "Total Revenues", "$950.99",
+        "PayPal Fee 5.00%", "-$47.55",
+        "Creator Split 20.00%", "$180.69",
+        "Product Total", "$180.69",
+        "Subtotal: $180.69",
+        "Total: $180.69",
+    ])
+    assert item_shares(payout_id) == ["$180.69"]
+
+
+def test_payout_slip_block_per_content(client, admin_headers, outbox):
+    creator_id = seed_two_content_creator()
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    _, text = sent_slip(outbox)
+    # Product Total tiap konten = share_usd item (sen dibagi allocate_cents).
+    assert item_shares(payout_id) == ["$0.29", "$0.28"]
+    assert_consecutive_lines(text, [
+        "Konten A (1 units)", "Total Revenues", "$1.00", "PayPal Fee 5.00%", "-$0.05",
+        "Creator Split 30.00%", "$0.29", "Product Total", "$0.29",
+        "Konten B (1 units)", "Total Revenues", "$1.00", "PayPal Fee 5.00%", "-$0.05",
+        "Creator Split 30.00%", "$0.28", "Product Total", "$0.28",
         "Subtotal: $0.57",
         "Total: $0.57",
     ])
-    assert text.count("Creator Earnings") == 2
+    for label in ("Total Revenues", "PayPal Fee", "Creator Split", "Product Total"):
+        assert text.count(label) == 2, label
     assert_no_internal_money(text)
+
+
+def test_payout_slip_without_paypal_fee_skips_fee_row(client, admin_headers, outbox):
+    assert client.put("/settings", json={"paypal_fee_pct": 0, "idr_rate": 16500}, headers=admin_headers).status_code == 200
+    creator_id = seed_creator(method="bank", details=BANK)
+    post_payout(client, admin_headers, creator_id)
+    _, text = sent_slip(outbox)
+    # Fee 0: net = net80 = 80, × 30% = 24.
+    assert_consecutive_lines(text, [
+        "Royal Mansion (10 units)", "Total Revenues", "$80.00",
+        "Creator Split 30.00%", "$24.00",
+        "Product Total", "$24.00",
+    ])
+    assert "PayPal Fee" not in text
+
+
+def test_payout_slip_keeps_fee_snapshot(client, admin_headers, outbox):
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    # Fee diubah setelah payout dicatat: slip yang dibuat ulang tetap memakai 5%.
+    client.put("/settings", json={"paypal_fee_pct": 10, "idr_rate": 17000}, headers=admin_headers)
+    text = regenerate_slip(payout_id)
+    assert_consecutive_lines(text, ["PayPal Fee 5.00%", "-$4.00", "Creator Split 30.00%", "$22.80"])
+    assert "Exchange Rate: Rp16.500,00/$" in text
+
+
+def test_payout_slip_item_without_calculation_chain(client, admin_headers, outbox):
+    # Item yang dicatat sebelum net80_usd/net_usd ada: hanya Product Total.
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    with SessionLocal() as db:
+        for item in db.get(models.Payout, payout_id).items:
+            item.net80_usd = item.net_usd = None
+        db.commit()
+    text = regenerate_slip(payout_id)
+    assert_consecutive_lines(text, ["Royal Mansion (10 units)", "Product Total", "$22.80", "Subtotal: $22.80"])
+    for absent in ("Total Revenues", "PayPal Fee", "Creator Split"):
+        assert absent not in text, absent
 
 
 def test_payout_slip_paypal_has_no_rupiah(client, admin_headers, outbox):
@@ -1212,7 +1304,7 @@ def test_payout_slip_paypal_has_no_rupiah(client, admin_headers, outbox):
     post_payout(client, admin_headers, creator_id)
     _, text = sent_slip(outbox)
     assert "Total: $22.80" in text
-    for absent in ("Rp", "Exchange Rate", "Total (IDR)", "Note", "PayPal", "kreator@gmail.com", "kr***"):
+    for absent in ("Rp", "Exchange Rate", "Total (IDR)", "Note", "kreator@gmail.com", "kr***"):
         assert absent not in text, absent
     assert_no_internal_money(text)
     assert_no_at_sign_outside_emails(text)
@@ -1264,30 +1356,58 @@ def test_slip_address_lines():
     assert main.slip_address_lines("") == []
 
 
-def slip_data(item_count, **overrides):
+def slip_data(block_count, **overrides):
+    """block_count konten, masing-masing 4 baris (Total Revenues, fee, split, Product Total)."""
+    items = [
+        payout_slip.SlipItem(
+            f"Konten {i:02d} ({i} units)",
+            [("Total Revenues", f"${i}.00"), ("PayPal Fee 5.00%", "-$0.05"), ("Creator Split 30.00%", "$0.30")],
+            "$0.30",
+        )
+        for i in range(1, block_count + 1)
+    ]
     data = dict(
         title="Payout Slip - kreator - Oktober 2026", created_on="3 November 2026", revenue_month="Oktober 2026",
-        sender=["Squareclouds Studio"], recipient=["Kreator"],
-        items=[(f"Konten {i:02d}", f"${i}.00") for i in range(1, item_count + 1)],
+        sender=["Squareclouds Studio"], recipient=["Kreator"], items=items,
         total_usd="$1.00", exchange_rate="Rp16.500,00/$", total_idr="Rp16.500,00", note=None,
     )
     return payout_slip.SlipData(**{**data, **overrides})
 
 
-def test_payout_pdf_fits_30_items_on_first_page():
-    pages = pdf_pages(payout_slip.render(slip_data(30)))
-    assert "Konten 30" in pages[0]
+def test_payout_pdf_fits_30_rows_on_first_page():
+    # 7 konten × 4 baris = 28 baris tabel: satu halaman.
+    pages = pdf_pages(payout_slip.render(slip_data(7)))
+    assert "Konten 07 (7 units)" in pages[0]
+    assert "Total: $1.00" in pages[-1]
 
 
-def test_payout_pdf_continues_after_30_items_with_repeated_header():
-    pages = pdf_pages(payout_slip.render(slip_data(31, note="Catatan panjang")))
+def test_payout_pdf_continues_after_30_rows_without_splitting_a_block():
+    # 8 konten × 4 baris = 32 baris: konten ke-8 utuh di halaman 2.
+    pages = pdf_pages(payout_slip.render(slip_data(8, note="Catatan panjang")))
     assert len(pages) == 2
-    assert "Konten 30" in pages[0]
-    assert "Konten 31" not in pages[0]
+    assert "Konten 07 (7 units)" in pages[0]
+    assert "Konten 08" not in pages[0]
     assert "Total:" not in pages[0]
-    assert_consecutive_lines(pages[1], ["Content", "Comment", "Price", "Konten 31", "Creator Earnings", "$31.00"])
+    assert_consecutive_lines(pages[1], [
+        "Content", "Comment", "Price",
+        "Konten 08 (8 units)", "Total Revenues", "$8.00",
+        "PayPal Fee 5.00%", "-$0.05", "Creator Split 30.00%", "$0.30", "Product Total", "$0.30",
+    ])
     for part in ("Subtotal: $1.00", "Total: $1.00", "Total (IDR): Rp16.500,00", "Note: Catatan panjang"):
         assert part in pages[1], part
+
+
+def test_slip_chunks_keep_blocks_whole():
+    def block(rows):
+        return payout_slip.SlipItem("x", [("a", "b")] * (rows - 1), "y")
+
+    sizes = [[len(c) for c in payout_slip._chunks(items)] for items in (
+        [block(4)] * 8,     # 7 × 4 = 28 ≤ 30, sisa 1
+        [block(3)] * 10,    # tanpa baris fee: 10 × 3 = 30 pas
+        [block(3)] * 11,
+        [],
+    )]
+    assert sizes == [[7, 1], [10], [10, 1], [0]]
 
 
 # ============================================================================

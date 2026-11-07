@@ -66,7 +66,8 @@ Admin (`require_admin`):
   `months` = `earnings.creator_months(db, user)`: dari bulan pertama kreator punya share > 0 sampai **bulan lengkap terakhir**,
   urut lama → baru (bulan kosong di antaranya ikut dengan share 0). Tiap item
   `{month, units, share_usd, share_idr, paid, payout_id, items}`; `share_idr = share_usd × idr_rate` saat ini, `None` untuk PayPal/belum diisi.
-  `items` = rincian per konten yang terjual bulan itu `[{content_id, name, units, share_usd}]`, urut nama. Sen dibagi dengan metode sisa
+  `items` = rincian per konten yang terjual bulan itu `[{content_id, name, units, net80_usd, net_usd, split_pct, share_usd}]`, urut
+  nama (berisi net & split, jadi hanya untuk admin). Sen dibagi dengan metode sisa
   terbesar (`earnings.allocate_cents`) supaya Σ `items.share_usd` = `share_usd` persis (dua share 0,285 → 0,29 + 0,28 = 0,57).
   Bulan lengkap terakhir = bulan sebelum bulan dari tanggal terakhir di **seluruh** `daily_sales` (data terakhir 2026-11-05 → 2026-10).
   Bulan berjalan tidak pernah ditawarkan.
@@ -81,7 +82,9 @@ Admin (`require_admin`):
     masih ada payout lama tanpa periode); snapshot `method/details/idr_rate` dari keadaan saat itu; `created_by` = admin.
   - `outstanding_usd` tetap = total share − total dibayar (termasuk payout lama dan bulan berjalan).
   - Rincian disalin ke tabel `payout_items` (`payout_id` FK ON DELETE CASCADE, `content_id`, snapshot `content_name`, `units`,
-    `share_usd`, `split_pct`), dibuat `migrate_payouts.py`. Σ `share_usd` item = `amount_usd`. Payout lama tidak punya item.
+    `net80_usd`, `net_usd`, `split_pct`, `share_usd`), dibuat/ditambah `migrate_payouts.py`. Σ `share_usd` item = `amount_usd`.
+    Payout lama tidak punya item; item lama tanpa `net80_usd`/`net_usd` (NULL) hanya menampilkan Product Total di slip.
+  - Snapshot `payouts.paypal_fee_pct` (fee saat dicatat) untuk label "PayPal Fee x%" di slip yang dibuat ulang belakangan.
   - Setelah tersimpan: slip PDF dibuat **sekali di memori** (tidak ditulis ke disk/DB), dikirim lewat email, lalu file yang sama
     diarsipkan ke Google Drive (lihat bawah). Respons `{message, notified, drive_saved, data}`; email atau Drive yang gagal hanya
     dicatat ke log dan disebut di `message`, payout tetap 201.
@@ -107,12 +110,17 @@ Slip PDF (reportlab, `backend/payout_slip.py` hanya tata letak; data disiapkan `
 - Blok identitas (font normal): kiri Squareclouds Studio, contact@squarecloudsmc.com, lalu `company_address` (per baris, atau per
   koma kalau satu baris; maks 3 baris, sisanya digabung ke baris terakhir). Kanan, rata kanan: nama, "<username> - Squareclouds
   Studio" (dilewati kalau tidak ada username), email.
-- Tabel full width Content | Comment | Price (Comment rata tengah, Price rata kanan), header bergaris bawah, baris selang-seling.
-  Satu baris per konten: nama | "Creator Earnings" | bagian kreator. Tidak ada kolom unit, "Total Revenues", maupun potongan.
-- Di bawah tabel, rata kanan: "Subtotal: $X" (bold), garis, "Total: $X" (bold, lebih besar); non-PayPal + "Exchange Rate:
-  Rp16.500,00/$" dan "Total (IDR): Rp…" (kecil). Catatan admin sebagai paragraf kecil "Note: …".
-- Tanpa footer. Lebih dari 30 konten: lanjut ke halaman berikut, header tabel diulang.
-- **Tidak boleh** ada unit, gross, net, fee, split, bagian Squareclouds, maupun tujuan payout.
+- Tabel full width Content | Comment | Price (Comment rata tengah, Price rata kanan), header bergaris bawah. Per konten satu blok
+  rantai perhitungan seperti slip Pathway (baris pertama berlatar abu muda):
+  1. "<nama> (1.585 units)" | Total Revenues | $net80 (sudah dipotong Pathway 20%)
+  2. | PayPal Fee 5.00% | -$(net80 − net) — dilewati kalau fee PayPal 0; persen dari snapshot `payouts.paypal_fee_pct`
+  3. | Creator Split 20.00% | $share_usd — persen = split konten itu untuk kreator ini
+  4. | **Product Total** | **$share_usd**
+- Di bawah tabel, rata kanan: "Subtotal: $X" (Σ Product Total, bold), garis, "Total: $X" (bold, lebih besar); non-PayPal +
+  "Exchange Rate: Rp16.500,00/$" dan "Total (IDR): Rp…" (kecil). Catatan admin sebagai paragraf kecil "Note: …".
+- Tanpa footer. Lebih dari 30 baris tabel: lanjut ke halaman berikut, header tabel diulang; blok satu konten tidak dipecah.
+- Aturan "kreator tidak melihat net" **tidak** berlaku untuk slip (tetap berlaku untuk dashboard/API kreator). Tetap **tidak boleh**
+  ada gross, bagian Squareclouds sebagai baris, maupun tujuan payout.
 
 Arsip Google Drive (`backend/gdrive.py`, google-api-python-client + google-auth):
 - Service account dari `GDRIVE_SA_FILE`, folder induk `GDRIVE_FOLDER_ID` (lihat `backend/.env.example`). Folder induk harus di
