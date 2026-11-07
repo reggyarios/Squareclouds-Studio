@@ -978,13 +978,17 @@ SLIP_SENDER_EMAIL = "contact@squarecloudsmc.com"
 UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
+def payout_period_label(payout: models.Payout) -> str:
+    """"Agustus 2026" untuk nama file slip dan subjek email; payout lama tanpa
+    periode memakai tanggal bayar ("3 November 2026")."""
+    return format_month_id(payout.period_month) if payout.period_month else format_date_id(payout.paid_at)
+
+
 def payout_slip_filename(user: models.User, payout: models.Payout) -> str:
     """"Payout Slip - <username> - <Bulan Tahun>.pdf", mis. "Payout Slip -
-    cgartz - Agustus 2026.pdf". Akun lama tanpa username memakai nama; payout
-    lama tanpa periode memakai tanggal bayar."""
+    cgartz - Agustus 2026.pdf". Akun lama tanpa username memakai nama."""
     who = user.username or user.name
-    when = format_month_id(payout.period_month) if payout.period_month else format_date_id(payout.paid_at)
-    return UNSAFE_FILENAME_CHARS.sub("-", f"Payout Slip - {who} - {when}.pdf")
+    return UNSAFE_FILENAME_CHARS.sub("-", f"Payout Slip - {who} - {payout_period_label(payout)}.pdf")
 
 
 def payout_slip_pdf(db: Session, user: models.User, payout: models.Payout) -> bytes:
@@ -1022,75 +1026,31 @@ def payout_slip_pdf(db: Session, user: models.User, payout: models.Payout) -> by
     ))
 
 
-def payout_items_email(payout: models.Payout) -> tuple[str, str]:
-    """Tabel ringkas per konten (teks, HTML) untuk email payout; kosong untuk
-    payout lama tanpa rincian."""
-    items = payout.items
-    if not items:
-        return "", ""
-    rows = [(i.content_name, f"{format_count(i.units)} unit", earnings.format_usd(i.share_usd)) for i in items]
-    total = ("Total", f"{format_count(sum(i.units for i in items))} unit", earnings.format_usd(payout.amount_usd))
-    widths = [max(len(row[col]) for row in rows + [total]) for col in range(3)]
-    text = "Rincian per konten:\n" + "\n".join(
-        f"  {name:<{widths[0]}}  {units:>{widths[1]}}  {usd:>{widths[2]}}" for name, units, usd in rows + [total]
-    )
-
-    cell = "padding:4px 16px 4px 0"
-    head = f'{cell};color:#6b7280;font-weight:normal;border-bottom:1px solid #e5e7eb'
-    foot = f"{cell};font-weight:bold;border-top:1px solid #e5e7eb"
-    html_rows = "".join(
-        f'<tr><td style="{cell}">{escape(name)}</td><td style="{cell};text-align:right">{units}</td>'
-        f'<td style="{cell};text-align:right">{usd}</td></tr>'
-        for name, units, usd in rows
-    )
-    html = (
-        '<p style="margin:16px 0 4px;font-weight:bold">Rincian per konten</p>'
-        '<table style="border-collapse:collapse;margin:0 0 16px">'
-        f'<tr><th style="{head};text-align:left">Konten</th><th style="{head};text-align:right">Unit</th>'
-        f'<th style="{head};text-align:right">USD</th></tr>'
-        f"{html_rows}"
-        f'<tr><td style="{foot}">Total</td><td style="{foot};text-align:right">{total[1]}</td>'
-        f'<td style="{foot};text-align:right">{total[2]}</td></tr>'
-        "</table>"
-    )
-    return text, html
-
-
 def send_payout_email(
     db: Session, user: models.User, payout: models.Payout, pdf: bytes | None = None
 ) -> bool:
-    amount = earnings.format_usd(payout.amount_usd)
-    # Rupiah dari snapshot payout (dihitung earnings.to_idr saat dicatat).
-    idr = (
-        f"≈ {earnings.format_idr(payout.amount_idr)} (kurs {earnings.format_idr(payout.idr_rate)}/$)"
-        if payout_shows_idr(payout)
-        else None
-    )
-    destination = payout_destination_text(payout.method, earnings.load_details(payout.details))
-    paid_on = format_date_id(payout.paid_at)
-    link = f"{portal_url()}/creator"
+    """Email singkat: periode, tanggal bayar, dan slip PDF terlampir.
 
-    rows = [("Jumlah", amount + (f"\n{idr}" if idr else "")), ("Tujuan", destination), ("Tanggal", paid_on)]
+    Jumlah, rupiah, kurs, tujuan, catatan, dan rincian konten sengaja tidak
+    ditulis di email; semuanya hanya ada di slip.
+    """
+    link = f"{portal_url()}/creator"
+    rows = [("Tanggal", format_date_id(payout.paid_at))]
     # Payout lama (sebelum payout per bulan) tidak punya periode.
     if payout.period_month:
         rows.insert(0, ("Periode", format_month_id(payout.period_month)))
-    if payout.note:
-        rows.append(("Catatan", payout.note))
-    items_text, items_html = payout_items_email(payout)
 
     text = (
         f"Halo {user.name},\n\n"
         "Payout pendapatan Anda dari Squareclouds Studio telah dikirim.\n\n"
-        + "\n".join(f"{label:8}: {value}".replace("\n", "\n" + " " * 10) for label, value in rows)
-        + (f"\n\n{items_text}" if items_text else "")
+        + "\n".join(f"{label:8}: {value}" for label, value in rows)
         + "\n\nSlip payout (PDF) terlampir.\n\n"
-        "Lihat rincian pendapatan dan riwayat payout di dashboard:\n"
-        f"{link}\n\n"
+        f"Buka dashboard: {link}\n\n"
         "Salam,\nSquareclouds Studio"
     )
     html_rows = "".join(
-        f'<tr><td style="padding:4px 16px 4px 0;color:#6b7280;vertical-align:top">{label}</td>'
-        f'<td style="padding:4px 0;font-weight:bold">{escape(value).replace(chr(10), "<br>")}</td></tr>'
+        f'<tr><td style="padding:4px 16px 4px 0;color:#6b7280">{label}</td>'
+        f'<td style="padding:4px 0;font-weight:bold">{escape(value)}</td></tr>'
         for label, value in rows
     )
     html = f"""\
@@ -1098,17 +1058,19 @@ def send_payout_email(
   <p>Halo {escape(user.name)},</p>
   <p>Payout pendapatan Anda dari <b>Squareclouds Studio</b> telah dikirim.</p>
   <table style="border-collapse:collapse;margin:8px 0 16px">{html_rows}</table>
-  {items_html}
   <p>Slip payout (PDF) terlampir.</p>
   <p><a href="{escape(link)}" style="display:inline-block;padding:10px 20px;border-radius:8px;
      background:#2563eb;color:#ffffff;text-decoration:none;font-weight:bold">Buka dashboard</a></p>
-  <p style="font-size:12px;color:#6b7280">Atau buka link ini: {escape(link)}</p>
   <p>Salam,<br>Squareclouds Studio</p>
 </div>"""
     pdf = pdf or payout_slip_pdf(db, user, payout)
     attachment = (payout_slip_filename(user, payout), pdf, "application/pdf")
     return mailer.send_mail(
-        user.email, f"Payout Squareclouds Studio: {amount} telah dikirim", html, text, attachments=[attachment]
+        user.email,
+        f"Payout Squareclouds Studio - {payout_period_label(payout)}",
+        html,
+        text,
+        attachments=[attachment],
     )
 
 

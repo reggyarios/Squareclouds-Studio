@@ -921,34 +921,57 @@ def test_payout_sends_email_to_creator(client, admin_headers, outbox, monkeypatc
 
     [mail] = outbox
     assert mail["to"] == "creator@example.com"
-    assert mail["subject"] == "Payout Squareclouds Studio: $22.80 telah dikirim"
+    assert mail["subject"] == "Payout Squareclouds Studio - Oktober 2026"
+    assert mail["text"] == (
+        "Halo Kreator,\n"
+        "\n"
+        "Payout pendapatan Anda dari Squareclouds Studio telah dikirim.\n"
+        "\n"
+        "Periode : Oktober 2026\n"
+        "Tanggal : 3 November 2026\n"
+        "\n"
+        "Slip payout (PDF) terlampir.\n"
+        "\n"
+        "Buka dashboard: https://portal.test/creator\n"
+        "\n"
+        "Salam,\n"
+        "Squareclouds Studio"
+    )
+    html = mail["html"]
     for part in (
-        "Halo Kreator,",
-        "Periode : Oktober 2026\n",
-        "$22.80",
-        "≈ Rp376.200,00 (kurs Rp16.500,00/$)",
-        "Transfer bank BCA ****7890",
-        "3 November 2026",
-        "Payout <Oktober>",
-        "https://portal.test/creator",
+        "<p>Halo Kreator,</p>",
+        ">Periode</td>",
+        ">Oktober 2026</td>",
+        ">Tanggal</td>",
+        ">3 November 2026</td>",
+        "<p>Slip payout (PDF) terlampir.</p>",
+        '<a href="https://portal.test/creator"',
+        ">Buka dashboard</a>",
+        "Salam,<br>Squareclouds Studio",
     ):
-        assert part in mail["text"], part
-    assert ">Periode</td>" in mail["html"]
-    assert ">Oktober 2026</td>" in mail["html"]
-    assert "Payout &lt;Oktober&gt;" in mail["html"]
-    assert "https://portal.test/creator" in mail["html"]
-    assert BANK["account_number"] not in mail["text"] + mail["html"]
+        assert part in html, part
+    assert_email_has_no_payout_details(mail)
 
 
-def test_payout_email_for_paypal_and_ewallet(client, admin_headers, outbox):
+# Hanya ada di slip PDF terlampir, tidak pernah di isi email.
+EMAIL_FORBIDDEN = (
+    "$", "22.80", "Rp", "kurs", "Jumlah", "Tujuan", "Catatan", "Transfer bank", "BCA", "7890",
+    "PayPal", "kr***", "DANA", "****", "Royal Mansion", "Konten", "Rincian", "Payout <Oktober>", "&lt;Oktober&gt;",
+)
+
+
+def assert_email_has_no_payout_details(mail):
+    body = mail["subject"] + mail["text"] + mail["html"]
+    leaked = [word for word in EMAIL_FORBIDDEN if word in body]
+    assert leaked == [], leaked
+
+
+def test_payout_email_has_no_amounts_for_any_method(client, admin_headers, outbox):
     creator_id = seed_creator(method="paypal", details={"paypal_email": "kreator@gmail.com"}, sales=SEPT_OCT_NOV)
-    res = post_payout(client, admin_headers, creator_id, "2026-09")
-    assert res.status_code == 201, res.text
-    assert outbox[-1]["subject"] == "Payout Squareclouds Studio: $22.80 telah dikirim"
-    assert "Periode : September 2026" in outbox[-1]["text"]
-    assert "PayPal kr***@gmail.com" in outbox[-1]["text"]
-    assert "Rp" not in outbox[-1]["text"]
-    assert "Catatan" not in outbox[-1]["text"]
+    assert post_payout(client, admin_headers, creator_id, "2026-09", note="x").status_code == 201
+    assert outbox[-1]["subject"] == "Payout Squareclouds Studio - September 2026"
+    assert "Periode : September 2026\n" in outbox[-1]["text"]
+    assert_email_has_no_payout_details(outbox[-1])
 
     with SessionLocal() as db:
         creator = db.get(models.User, creator_id)
@@ -956,9 +979,11 @@ def test_payout_email_for_paypal_and_ewallet(client, admin_headers, outbox):
         creator.payout_details = json.dumps({"provider": "DANA", "phone": "081234565678", "account_name": "K"})
         db.commit()
     post_payout(client, admin_headers, creator_id, "2026-10")
-    assert "Periode : Oktober 2026" in outbox[-1]["text"]
-    assert "DANA ****5678" in outbox[-1]["text"]
-    assert "≈ Rp188.100,00 (kurs Rp16.500,00/$)" in outbox[-1]["text"]  # 11,4 × 16.500
+    assert outbox[-1]["subject"] == "Payout Squareclouds Studio - Oktober 2026"
+    assert_email_has_no_payout_details(outbox[-1])
+    # Jumlah & rupiah tetap ada di slip terlampir.
+    [(_, data, _)] = outbox[-1]["attachments"]
+    assert "Rp188.100,00" in pdf_text(data)  # 11,4 × 16.500
 
 
 def test_payout_email_without_period_for_legacy_payout(client, admin_headers, outbox):
@@ -967,34 +992,28 @@ def test_payout_email_without_period_for_legacy_payout(client, admin_headers, ou
         payout_id = add_payout(db, db.get(models.User, creator_id), 5.0).id
         db.commit()
     assert client.post(f"/payouts/{payout_id}/notify", headers=admin_headers).status_code == 200
-    assert "Periode" not in outbox[-1]["text"] + outbox[-1]["html"]
-    assert "Rincian per konten" not in outbox[-1]["text"] + outbox[-1]["html"]
-    assert "Jumlah  : $5.00" in outbox[-1]["text"]
-    # Slip tetap terlampir, dengan nomor slip di nama file (tanpa periode).
-    [(filename, data, mime_type)] = outbox[-1]["attachments"]
-    # Tanpa periode: tanggal bayar di nama file.
+    mail = outbox[-1]
+    # Tanpa periode: tanggal bayar di subjek dan nama file, baris Periode dilewati.
+    assert mail["subject"] == "Payout Squareclouds Studio - 1 November 2026"
+    assert "Periode" not in mail["text"] + mail["html"]
+    assert "telah dikirim.\n\nTanggal : 1 November 2026\n\nSlip payout (PDF) terlampir." in mail["text"]
+    [(filename, data, mime_type)] = mail["attachments"]
     assert (filename, mime_type) == ("Payout Slip - kreator - 1 November 2026.pdf", "application/pdf")
     assert data.startswith(b"%PDF")
 
 
-def test_payout_email_attaches_slip_and_lists_contents(client, admin_headers, outbox):
+def test_payout_email_attaches_slip_with_content_breakdown(client, admin_headers, outbox):
     creator_id = seed_two_content_creator()
     assert post_payout(client, admin_headers, creator_id).status_code == 201
 
     mail = outbox[-1]
     [(filename, data, mime_type)] = mail["attachments"]
     assert (filename, mime_type) == ("Payout Slip - kreator - Oktober 2026.pdf", "application/pdf")
-    assert "Konten A" in pdf_text(data)
-    assert (
-        "Rincian per konten:\n"
-        "  Konten A  1 unit  $0.29\n"
-        "  Konten B  1 unit  $0.28\n"
-        "  Total     2 unit  $0.57\n"
-    ) in mail["text"]
-    assert "Slip payout (PDF) terlampir." in mail["text"]
-    assert "Rincian per konten" in mail["html"]
-    assert ">Konten A</td>" in mail["html"]
-    assert ">$0.57</td>" in mail["html"]
+    # Rincian per konten hanya di PDF, tidak di email.
+    text = pdf_text(data)
+    for part in ("Konten A", "$0.29", "Konten B", "$0.28", "$0.57"):
+        assert part in text, part
+    assert_email_has_no_payout_details(mail)
 
 
 def test_mailer_sends_attachment_as_multipart(monkeypatch):
@@ -1079,7 +1098,7 @@ def test_resend_payout_email(client, admin_headers, monkeypatch):
     res = client.post(url, headers=admin_headers)
     assert res.status_code == 200, res.text
     assert res.json()["data"]["notified_at"] is not None
-    assert sent == ["Payout Squareclouds Studio: $22.80 telah dikirim"]
+    assert sent == ["Payout Squareclouds Studio - Oktober 2026"]
 
     # Sudah terkirim -> tidak dikirim dua kali.
     assert client.post(url, headers=admin_headers).status_code == 400

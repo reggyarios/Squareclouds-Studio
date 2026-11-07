@@ -89,9 +89,11 @@ Admin (`require_admin`):
   (error Drive diabaikan, dicatat ke log).
 - `POST /payouts/{id}/notify`: kirim ulang email; slip dibuat ulang di memori.
 - `POST /payouts/{id}/drive`: upload ulang slip ke Drive; 400 jika sudah tersimpan, 502 jika gagal lagi.
-- Email payout ke kreator: baris **Periode** (mis. "Oktober 2026") di atas Jumlah; payout lama tanpa periode tidak punya baris itu.
-  Rupiah memakai `earnings.format_idr` (§5 Format angka). Isi email juga memuat tabel ringkas per konten (nama, unit, USD) + total,
-  dan slip PDF dilampirkan (`mailer.send_mail(..., attachments=...)`).
+- Email payout ke kreator (teks + HTML), sengaja singkat. Subjek `Payout Squareclouds Studio - <Bulan Tahun>`. Isi: sapaan,
+  "Payout pendapatan Anda dari Squareclouds Studio telah dikirim.", baris **Periode** dan **Tanggal** (tanggal bayar), "Slip payout
+  (PDF) terlampir.", tombol **Buka dashboard** (`<PORTAL_URL>/creator`; link biasa di versi teks), salam. **Tidak ada** jumlah,
+  rupiah, kurs, tujuan, catatan, maupun rincian konten di email: semuanya hanya di slip PDF terlampir
+  (`mailer.send_mail(..., attachments=...)`). Payout lama tanpa periode: baris Periode dilewati, subjek memakai tanggal bayar.
 - Riwayat payout (admin & kreator) menyertakan `period_month`; admin juga `drive_file_id`.
 - Slip **tidak bisa diunduh** dari portal (tidak ada endpoint detail/PDF); salinannya hanya di email kreator dan arsip Drive.
 
