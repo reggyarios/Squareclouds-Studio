@@ -157,6 +157,7 @@ def load_details(raw: str | None) -> dict | None:
 def serialize_payout(payout: models.Payout, include_internal: bool) -> dict:
     item = {
         "id": payout.id,
+        "period_month": payout.period_month,
         "paid_at": payout.paid_at,
         "amount_usd": money(payout.amount_usd),
         "idr_rate": payout.idr_rate,
@@ -261,6 +262,83 @@ def creator_summary(db: Session, user: models.User, include_internal: bool) -> d
         "by_month": by_month,
         "payouts": [serialize_payout(p, include_internal) for p in payouts],
     }
+
+
+# ============================================================================
+# PAYOUT PER BULAN
+# ============================================================================
+
+def shift_month(month: str, delta: int) -> str:
+    """"2026-01", -1 -> "2025-12"."""
+    index = int(month[:4]) * 12 + int(month[5:7]) - 1 + delta
+    return f"{index // 12:04d}-{index % 12 + 1:02d}"
+
+
+def last_complete_month(db: Session) -> str | None:
+    """Bulan sebelum bulan dari tanggal data terakhir di daily_sales
+    (2026-11-05 -> "2026-10"); None kalau belum ada data.
+
+    Diambil dari seluruh daily_sales, bukan hanya konten satu kreator: bot
+    menyinkron semua konten sekaligus, jadi tanggal terakhir = sejauh mana data
+    Pathway sudah masuk. Bulan dari tanggal itu masih berjalan, jadi belum
+    bisa dibayar.
+    """
+    last_date = db.query(func.max(models.DailySales.date)).scalar()
+    return shift_month(last_date[:7], -1) if last_date else None
+
+
+def creator_months(db: Session, user: models.User) -> list[dict]:
+    """Bulan-bulan yang bisa dibayar satu kreator, urut lama ke baru: dari
+    bulan pertama dengan bagian > 0 sampai bulan lengkap terakhir (bulan di
+    antaranya ikut, walau 0). Bulan berjalan tidak pernah ada di sini.
+
+    share_usd = bagian kreator bulan itu (2 desimal) = jumlah yang dicatat
+    POST /payouts. share_idr = share_usd × kurs saat ini, hanya untuk metode
+    bank/e-wallet (None untuk PayPal/belum diisi); juga persis jumlah rupiah
+    yang dicatat.
+    """
+    last_complete = last_complete_month(db)
+    if last_complete is None:
+        return []
+
+    splits = dict(
+        db.query(models.CreatorSplit.content_id, models.CreatorSplit.split_percentage)
+        .filter(models.CreatorSplit.user_id == user.id)
+    )
+    totals = {}
+    for row in content_rows(db, user_id=user.id):
+        if row["month"] > last_complete:
+            continue
+        bucket = totals.setdefault(row["month"], {"units": 0, "share": 0.0})
+        bucket["units"] += row["units"]
+        bucket["share"] += creator_share(row["net_usd"], splits[row["content_id"]])
+
+    earning = sorted(m for m, b in totals.items() if money(b["share"]) > 0)
+    if not earning:
+        return []
+
+    paid = dict(
+        db.query(models.Payout.period_month, models.Payout.id).filter(
+            models.Payout.user_id == user.id,
+            models.Payout.period_month.isnot(None),
+        )
+    )
+    rate = idr_rate(db)
+    result = []
+    month = earning[0]
+    while month <= last_complete:
+        bucket = totals.get(month, {"units": 0, "share": 0.0})
+        share_usd = money(bucket["share"])
+        result.append({
+            "month": month,
+            "units": bucket["units"],
+            "share_usd": share_usd,
+            "share_idr": money(to_idr(share_usd, rate)) if user.payout_method in IDR_METHODS else None,
+            "paid": month in paid,
+            "payout_id": paid.get(month),
+        })
+        month = shift_month(month, 1)
+    return result
 
 
 # ============================================================================

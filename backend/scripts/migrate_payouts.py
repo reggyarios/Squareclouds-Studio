@@ -26,8 +26,13 @@ dengan angka Pathway, termasuk 0 yang asli.
 Tabel baru:
     settings    pengaturan admin; di-seed paypal_fee_pct dan idr_rate
                 kalau belum ada (nilai yang sudah ada tidak ditimpa)
-    payouts     riwayat pembayaran ke kreator; kolom notified_at (waktu email
-                notifikasi terkirim) ikut ditambahkan kalau tabelnya sudah ada
+    payouts     riwayat pembayaran ke kreator; kalau tabelnya sudah ada, kolom
+                ini ikut ditambahkan:
+                  notified_at    waktu email notifikasi terkirim
+                  period_month   bulan yang dibayar (YYYY-MM); payout lama
+                                 tetap NULL (tanpa periode)
+                plus unique index uq_payouts_user_period (user_id,
+                period_month): satu payout per kreator per bulan
 """
 import sys
 from datetime import datetime, timezone
@@ -93,6 +98,17 @@ with engine.begin() as conn:
     # dengan kolomnya); di DB lama kolom ini ditambahkan ke tabel yang ada.
     conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "notified_at" VARCHAR'))
     print(f"{'payouts.notified_at':32} ok")
+    conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "period_month" VARCHAR'))
+    print(f"{'payouts.period_month':32} ok")
+    # Nama sama dengan Index di models.Payout, jadi DB baru (create_all di
+    # atas) dilewati di sini. NULL tidak bentrok: payout lama boleh banyak.
+    conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_payouts_user_period "
+            'ON payouts (user_id, "period_month")'
+        )
+    )
+    print(f"{'payouts uq (user_id, period_month)':32} ok")
     for key, value in models.SETTING_DEFAULTS.items():
         inserted = conn.execute(
             text(

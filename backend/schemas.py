@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Any, Dict, Optional, List
 
 # ==========================================
@@ -39,8 +39,12 @@ class SettingsUpdate(BaseModel):
     idr_rate: float
 
 class PayoutCreate(BaseModel):
+    # Jumlah tidak bisa diisi: amount_usd/amount_idr dihitung server dari
+    # earnings.creator_months. Field lain (termasuk amount_usd) ditolak 422.
+    model_config = ConfigDict(extra="forbid")
+
     user_id: int
-    amount_usd: float
+    period_month: str  # YYYY-MM, bulan lengkap yang belum dibayar
     note: Optional[str] = None
     paid_at: Optional[str] = None  # YYYY-MM-DD, default hari ini (UTC)
 

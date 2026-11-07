@@ -428,6 +428,10 @@ class Payout(Base):
         index=True,
     )
 
+    # Bulan pendapatan yang dibayar (YYYY-MM); amount_usd = bagian kreator di
+    # bulan itu. NULL = payout lama sebelum payout per bulan (tanpa periode).
+    period_month = Column(String, nullable=True)
+
     amount_usd = Column(Float, nullable=False)
 
     # Snapshot kurs saat dibayar
@@ -460,6 +464,13 @@ class Payout(Base):
     # ISO timestamp UTC saat email notifikasi payout terkirim (NULL = gagal /
     # belum terkirim; admin bisa kirim ulang)
     notified_at = Column(String, nullable=True)
+
+    # Satu payout per kreator per bulan. NULL tidak bentrok (payout lama).
+    # Index (bukan UniqueConstraint) supaya create_all dan
+    # scripts/migrate_payouts.py membuat objek yang sama dengan nama yang sama.
+    __table_args__ = (
+        Index("uq_payouts_user_period", "user_id", "period_month", unique=True),
+    )
 
 
 # ============================================================

@@ -875,6 +875,9 @@ def update_settings(
 
 PAYOUT_METHODS = ("paypal", "bank", "ewallet")
 
+# Periode payout: YYYY-MM.
+MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
+
 
 @app.get("/users/{user_id}/earnings")
 def get_user_earnings(
@@ -887,6 +890,8 @@ def get_user_earnings(
     # Data payout lengkap (tidak dimask): admin perlu untuk membayar.
     return {
         **earnings.creator_summary(db, user, include_internal=True),
+        # Bulan lengkap yang bisa / sudah dibayar (form Catat pembayaran).
+        "months": earnings.creator_months(db, user),
         "payout_method": user.payout_method,
         "payout_details": earnings.load_details(user.payout_details),
     }
@@ -905,6 +910,13 @@ def format_date_id(value: str) -> str:
     except ValueError:
         return value
     return f"{d.day} {MONTHS_ID[d.month - 1]} {d.year}"
+
+
+def format_month_id(value: str) -> str:
+    """YYYY-MM -> "Oktober 2026"."""
+    if not MONTH_RE.fullmatch(value or ""):
+        return value
+    return f"{MONTHS_ID[int(value[5:7]) - 1]} {value[:4]}"
 
 
 def payout_destination_text(method: str, details: dict | None) -> str:
@@ -934,6 +946,9 @@ def send_payout_email(user: models.User, payout: models.Payout) -> bool:
     link = f"{portal_url()}/creator"
 
     rows = [("Jumlah", amount + (f"\n{idr}" if idr else "")), ("Tujuan", destination), ("Tanggal", paid_on)]
+    # Payout lama (sebelum payout per bulan) tidak punya periode.
+    if payout.period_month:
+        rows.insert(0, ("Periode", format_month_id(payout.period_month)))
     if payout.note:
         rows.append(("Catatan", payout.note))
 
@@ -997,7 +1012,8 @@ def create_payout(
 ):
     require_admin(current_user)
     # Kunci baris kreator (PostgreSQL) supaya dua pencatatan bersamaan tidak
-    # bisa sama-sama lolos cek saldo tertunda.
+    # bisa sama-sama lolos cek "sudah dibayar" dan saldo tertunda. Unique
+    # index (user_id, period_month) tetap jadi pengaman terakhir.
     user = (
         db.query(models.User)
         .filter(models.User.id == payload.user_id)
@@ -1011,11 +1027,27 @@ def create_payout(
     if user.payout_method not in PAYOUT_METHODS:
         raise HTTPException(status_code=400, detail="Kreator belum mengisi metode payout.")
 
-    if not math.isfinite(payload.amount_usd):
-        raise HTTPException(status_code=400, detail="Jumlah payout tidak valid.")
-    amount = round(payload.amount_usd, 2)
+    # Jumlah selalu dihitung server: bagian kreator di bulan itu.
+    period = payload.period_month.strip()
+    if not MONTH_RE.fullmatch(period):
+        raise HTTPException(status_code=400, detail="Periode harus berformat YYYY-MM.")
+    label = format_month_id(period)
+    month = next((m for m in earnings.creator_months(db, user) if m["month"] == period), None)
+    if month is None:
+        last_complete = earnings.last_complete_month(db)
+        if last_complete is None or period > last_complete:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Periode {label} belum lengkap; hanya bulan yang sudah lewat yang bisa dibayar.",
+            )
+        raise HTTPException(status_code=400, detail=f"Tidak ada pendapatan untuk periode {label}.")
+    if month["paid"]:
+        raise HTTPException(status_code=400, detail=f"Periode {label} sudah dibayar.")
+    amount = month["share_usd"]
     if amount <= 0:
-        raise HTTPException(status_code=400, detail="Jumlah payout harus lebih dari 0.")
+        raise HTTPException(status_code=400, detail=f"Tidak ada pendapatan untuk periode {label}.")
+    # Bisa terjadi kalau masih ada payout lama tanpa periode yang sudah
+    # menutup sebagian pendapatan bulan ini.
     outstanding = earnings.creator_summary(db, user, include_internal=False)["outstanding_usd"]
     if amount > outstanding:
         raise HTTPException(
@@ -1032,12 +1064,13 @@ def create_payout(
     else:
         paid_at = datetime.now(timezone.utc).date().isoformat()
 
-    rate = earnings.idr_rate(db)
     payout = models.Payout(
         user_id=user.id,
+        period_month=period,
         amount_usd=amount,
-        idr_rate=rate,
-        amount_idr=earnings.to_idr(amount, rate) if user.payout_method in earnings.IDR_METHODS else None,
+        idr_rate=earnings.idr_rate(db),
+        # None untuk PayPal (creator_months hanya mengisinya untuk bank/e-wallet).
+        amount_idr=month["share_idr"],
         method=user.payout_method,
         details=user.payout_details or "{}",
         note=(payload.note or "").strip() or None,
@@ -1046,13 +1079,17 @@ def create_payout(
         created_at=iso_utc(datetime.now(timezone.utc)),
     )
     db.add(payout)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=f"Periode {label} sudah dibayar.")
     db.refresh(payout)
 
     # Setelah commit, supaya email yang gagal tidak membatalkan payout.
     notified = notify_payout(db, payout)
     db.refresh(payout)
-    message = f"Payout ${amount:,.2f} untuk {user.name} dicatat."
+    message = f"Payout {label} (${amount:,.2f}) untuk {user.name} dicatat."
     return {
         "message": message
         + (
