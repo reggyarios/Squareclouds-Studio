@@ -32,6 +32,8 @@ Tabel baru:
                   notified_at    waktu email notifikasi terkirim
                   period_month   bulan yang dibayar (YYYY-MM); payout lama
                                  tetap NULL (tanpa periode)
+                  drive_file_id  file ID slip PDF di Google Drive; NULL =
+                                 belum tersimpan (bisa diupload ulang admin)
                 plus unique index uq_payouts_user_period (user_id,
                 period_month): satu payout per kreator per bulan
     payout_items
@@ -105,6 +107,8 @@ with engine.begin() as conn:
     print(f"{'payouts.notified_at':32} ok")
     conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "period_month" VARCHAR'))
     print(f"{'payouts.period_month':32} ok")
+    conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "drive_file_id" VARCHAR'))
+    print(f"{'payouts.drive_file_id':32} ok")
     # Nama sama dengan Index di models.Payout, jadi DB baru (create_all di
     # atas) dilewati di sini. NULL tidak bentrok: payout lama boleh banyak.
     conn.execute(

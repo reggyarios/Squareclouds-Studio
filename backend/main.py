@@ -23,6 +23,7 @@ import models
 import schemas
 import auth
 import earnings
+import gdrive
 import mailer
 import payout_slip
 from utils.file_storage import delete_upload, extract_upload_path
@@ -1055,7 +1056,9 @@ def payout_items_email(payout: models.Payout) -> tuple[str, str]:
     return text, html
 
 
-def send_payout_email(db: Session, user: models.User, payout: models.Payout) -> bool:
+def send_payout_email(
+    db: Session, user: models.User, payout: models.Payout, pdf: bytes | None = None
+) -> bool:
     amount = earnings.format_usd(payout.amount_usd)
     # Rupiah dari snapshot payout (dihitung earnings.to_idr saat dicatat).
     idr = (
@@ -1102,21 +1105,25 @@ def send_payout_email(db: Session, user: models.User, payout: models.Payout) -> 
   <p style="font-size:12px;color:#6b7280">Atau buka link ini: {escape(link)}</p>
   <p>Salam,<br>Squareclouds Studio</p>
 </div>"""
-    attachment = (payout_slip_filename(user, payout), payout_slip_pdf(db, user, payout), "application/pdf")
+    pdf = pdf or payout_slip_pdf(db, user, payout)
+    attachment = (payout_slip_filename(user, payout), pdf, "application/pdf")
     return mailer.send_mail(
         user.email, f"Payout Squareclouds Studio: {amount} telah dikirim", html, text, attachments=[attachment]
     )
 
 
-def notify_payout(db: Session, payout: models.Payout) -> bool:
+def notify_payout(db: Session, payout: models.Payout, pdf: bytes | None = None) -> bool:
     """Kirim email payout ke kreator; notified_at diisi kalau terkirim.
+
+    pdf: slip yang sudah dibuat (POST /payouts memakai slip yang sama untuk
+    email dan Drive); None = dibuat di sini (kirim ulang email).
 
     Gagal kirim (error SMTP, atau SMTP belum dikonfigurasi) hanya dicatat ke
     log: payout yang sudah tersimpan tidak pernah dibatalkan karena email.
     """
     user = db.get(models.User, payout.user_id)
     try:
-        sent = send_payout_email(db, user, payout)
+        sent = send_payout_email(db, user, payout, pdf)
     except Exception as e:
         print(f"Payout Mail Error (payout {payout.id}): {e}", flush=True)
         return False
@@ -1128,6 +1135,38 @@ def notify_payout(db: Session, payout: models.Payout) -> bool:
     except Exception as e:
         db.rollback()
         print(f"Payout notified_at Error (payout {payout.id}): {e}", flush=True)
+        return False
+    return True
+
+
+def drive_subfolder(payout: models.Payout) -> str:
+    """Subfolder Drive per tahun-bulan periode; payout lama: bulan bayar."""
+    return payout.period_month or payout.paid_at[:7]
+
+
+def upload_payout_slip(db: Session, payout: models.Payout, pdf: bytes | None = None) -> bool:
+    """Arsipkan slip PDF ke Google Drive; drive_file_id diisi kalau berhasil.
+
+    Drive belum dikonfigurasi (GDRIVE_* kosong) atau upload gagal hanya
+    dicatat ke log: payout tidak pernah dibatalkan karena Drive. Admin bisa
+    upload ulang (POST /payouts/{id}/drive).
+    """
+    user = db.get(models.User, payout.user_id)
+    try:
+        pdf = pdf or payout_slip_pdf(db, user, payout)
+        file_id = gdrive.upload_pdf(payout_slip_filename(user, payout), pdf, drive_subfolder(payout))
+    except gdrive.DriveNotConfigured as e:
+        print(f"Payout Drive dilewati (payout {payout.id}): {e}", flush=True)
+        return False
+    except Exception as e:
+        print(f"Payout Drive Error (payout {payout.id}): {e}", flush=True)
+        return False
+    try:
+        payout.drive_file_id = file_id
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Payout drive_file_id Error (payout {payout.id}, file {file_id}): {e}", flush=True)
         return False
     return True
 
@@ -1229,8 +1268,16 @@ def create_payout(
         raise HTTPException(status_code=400, detail=f"Periode {label} sudah dibayar.")
     db.refresh(payout)
 
-    # Setelah commit, supaya email yang gagal tidak membatalkan payout.
-    notified = notify_payout(db, payout)
+    # Setelah commit, supaya email atau Drive yang gagal tidak membatalkan
+    # payout. Slip dibuat sekali di memori: dikirim lewat email, lalu file
+    # yang sama diarsipkan ke Google Drive.
+    try:
+        pdf = payout_slip_pdf(db, user, payout)
+    except Exception as e:
+        print(f"Payout Slip Error (payout {payout.id}): {e}", flush=True)
+        pdf = None
+    notified = notify_payout(db, payout, pdf)
+    drive_saved = upload_payout_slip(db, payout, pdf)
     db.refresh(payout)
     message = f"Payout {label} (${amount:,.2f}) untuk {user.name} dicatat."
     return {
@@ -1239,8 +1286,14 @@ def create_payout(
             " Email notifikasi terkirim."
             if notified
             else " Email notifikasi gagal dikirim; kirim ulang dari riwayat payout."
+        )
+        + (
+            " Slip tersimpan di Google Drive."
+            if drive_saved
+            else " Slip gagal disimpan ke Google Drive; upload ulang dari riwayat payout."
         ),
         "notified": notified,
+        "drive_saved": drive_saved,
         "data": earnings.serialize_payout(payout, include_internal=True),
     }
 
@@ -1279,9 +1332,41 @@ def delete_payout(
     payout = db.query(models.Payout).filter(models.Payout.id == payout_id).first()
     if not payout:
         raise HTTPException(status_code=404, detail="Payout tidak ditemukan")
+    drive_file_id = payout.drive_file_id
     db.delete(payout)
     db.commit()
+    # Slip di Drive ikut dihapus; error diabaikan (cukup dicatat ke log).
+    if drive_file_id:
+        try:
+            gdrive.delete_file(drive_file_id)
+        except Exception as e:
+            print(f"Payout Drive Delete Error (file {drive_file_id}): {e}", flush=True)
     return {"message": "Payout dihapus."}
+
+
+@app.post("/payouts/{payout_id}/drive")
+def reupload_payout_slip(
+    payout_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    require_admin(current_user)
+    payout = db.query(models.Payout).filter(models.Payout.id == payout_id).first()
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout tidak ditemukan")
+    if payout.drive_file_id:
+        raise HTTPException(status_code=400, detail="Slip payout ini sudah tersimpan di Google Drive.")
+    if not upload_payout_slip(db, payout):
+        raise HTTPException(
+            status_code=502,
+            detail="Upload ke Google Drive gagal. Cek GDRIVE_SA_FILE, GDRIVE_FOLDER_ID, dan akses "
+            "service account ke folder, lalu coba lagi.",
+        )
+    db.refresh(payout)
+    return {
+        "message": "Slip payout tersimpan di Google Drive.",
+        "data": earnings.serialize_payout(payout, include_internal=True),
+    }
 
 
 # ============================================================================

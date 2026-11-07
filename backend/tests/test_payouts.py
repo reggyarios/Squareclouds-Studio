@@ -21,6 +21,7 @@ Payout per bulan (§4 POST /payouts):
 """
 import io
 import json
+import re
 import smtplib
 
 import pytest
@@ -29,6 +30,7 @@ from sqlalchemy.exc import IntegrityError
 
 import auth
 import earnings
+import gdrive
 import mailer
 import models
 import payout_slip
@@ -1247,3 +1249,216 @@ def test_payout_pdf_continues_after_25_items_with_repeated_header():
     assert "Total (USD)" not in pages[0]
     for part in ("Content", "Units Sold", "Earnings (USD)", "Konten 26", "Konten 30", "Total (USD)", "Catatan panjang"):
         assert part in pages[1], part
+
+
+# ============================================================================
+# ARSIP GOOGLE DRIVE
+# ============================================================================
+
+@pytest.fixture
+def drive(monkeypatch, outbox):
+    """Ganti gdrive.upload_pdf/delete_file. fail / fail_delete = True membuat
+    panggilan berikutnya melempar error."""
+    state = {"uploads": [], "deleted": [], "fail": False, "fail_delete": False}
+
+    def fake_upload(filename, data, subfolder):
+        if state["fail"]:
+            raise RuntimeError("Drive mati")
+        # Jumlah email yang sudah terkirim saat upload (urutan: email dulu).
+        state["uploads"].append({"filename": filename, "data": data, "subfolder": subfolder, "emails": len(outbox)})
+        return f"drive-file-{len(state['uploads'])}"
+
+    def fake_delete(file_id):
+        state["deleted"].append(file_id)
+        if state["fail_delete"]:
+            raise RuntimeError("Drive mati")
+
+    monkeypatch.setattr(gdrive, "upload_pdf", fake_upload)
+    monkeypatch.setattr(gdrive, "delete_file", fake_delete)
+    return state
+
+
+def get_drive_file_id(payout_id):
+    with SessionLocal() as db:
+        return db.get(models.Payout, payout_id).drive_file_id
+
+
+def test_payout_slip_uploaded_to_drive_after_email(client, admin_headers, outbox, drive):
+    creator_id = seed_creator(method="bank", details=BANK)
+    res = post_payout(client, admin_headers, creator_id)
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["drive_saved"] is True
+    assert "Slip tersimpan di Google Drive." in body["message"]
+    assert body["data"]["drive_file_id"] == "drive-file-1"
+    assert get_drive_file_id(body["data"]["id"]) == "drive-file-1"
+
+    [upload] = drive["uploads"]
+    assert upload["filename"] == "Payout Slip - kreator - Oktober 2026.pdf"
+    assert upload["subfolder"] == "2026-10"
+    assert upload["emails"] == 1  # email dikirim lebih dulu
+    # PDF yang sama dengan lampiran email.
+    [(_, attached, _)] = outbox[-1]["attachments"]
+    assert upload["data"] == attached
+
+
+def test_payout_saved_when_drive_upload_fails(client, admin_headers, outbox, drive):
+    drive["fail"] = True
+    creator_id = seed_creator(method="bank", details=BANK)
+    res = post_payout(client, admin_headers, creator_id)
+    assert res.status_code == 201, res.text
+    body = res.json()
+    assert body["drive_saved"] is False
+    assert body["notified"] is True
+    assert "gagal disimpan ke Google Drive" in body["message"]
+    assert body["data"]["drive_file_id"] is None
+    with SessionLocal() as db:
+        payout = db.get(models.Payout, body["data"]["id"])
+        assert (payout.amount_usd, payout.drive_file_id) == (22.8, None)
+
+
+def test_payout_saved_when_drive_not_configured(client, admin_headers):
+    # conftest mengosongkan GDRIVE_*: upload dilewati tanpa menghubungi Google.
+    creator_id = seed_creator(method="bank", details=BANK)
+    res = post_payout(client, admin_headers, creator_id)
+    assert res.status_code == 201, res.text
+    assert res.json()["drive_saved"] is False
+    assert get_drive_file_id(res.json()["data"]["id"]) is None
+    with pytest.raises(gdrive.DriveNotConfigured):
+        gdrive.upload_pdf("x.pdf", b"%PDF", "2026-10")
+
+
+def test_reupload_payout_slip_to_drive(client, admin_headers, drive):
+    drive["fail"] = True
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    url = f"/payouts/{payout_id}/drive"
+
+    # Admin-only.
+    assert client.post(url).status_code == 401
+    assert client.post(url, headers=login(client)).status_code == 403
+    assert client.post("/payouts/999/drive", headers=admin_headers).status_code == 404
+
+    # Masih gagal -> 502, drive_file_id tetap NULL.
+    res = client.post(url, headers=admin_headers)
+    assert res.status_code == 502
+    assert get_drive_file_id(payout_id) is None
+
+    drive["fail"] = False
+    res = client.post(url, headers=admin_headers)
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["drive_file_id"] == "drive-file-1"
+    assert get_drive_file_id(payout_id) == "drive-file-1"
+    assert drive["uploads"][0]["filename"] == "Payout Slip - kreator - Oktober 2026.pdf"
+    assert drive["uploads"][0]["data"].startswith(b"%PDF")
+
+    # Sudah tersimpan -> tidak diupload dua kali.
+    assert client.post(url, headers=admin_headers).status_code == 400
+    assert len(drive["uploads"]) == 1
+
+
+def test_reupload_legacy_payout_uses_payment_month_folder(client, admin_headers, drive):
+    creator_id = seed_creator(method="bank", details=BANK)
+    with SessionLocal() as db:
+        payout_id = add_payout(db, db.get(models.User, creator_id), 5.0, paid_at="2026-09-15").id
+        db.commit()
+    assert client.post(f"/payouts/{payout_id}/drive", headers=admin_headers).status_code == 200
+    [upload] = drive["uploads"]
+    assert (upload["filename"], upload["subfolder"]) == ("Payout Slip - kreator - 15 September 2026.pdf", "2026-09")
+
+
+def test_delete_payout_deletes_drive_file(client, admin_headers, drive):
+    creator_id = seed_creator(method="bank", details=BANK, sales=SEPT_OCT_NOV)
+    september = post_payout(client, admin_headers, creator_id, "2026-09").json()["data"]["id"]
+    october = post_payout(client, admin_headers, creator_id, "2026-10").json()["data"]["id"]
+
+    assert client.delete(f"/payouts/{september}", headers=admin_headers).status_code == 200
+    assert drive["deleted"] == ["drive-file-1"]
+
+    # Error Drive diabaikan: payout tetap terhapus.
+    drive["fail_delete"] = True
+    assert client.delete(f"/payouts/{october}", headers=admin_headers).status_code == 200
+    assert drive["deleted"] == ["drive-file-1", "drive-file-2"]
+    with SessionLocal() as db:
+        assert db.query(models.Payout).count() == 0
+
+
+def test_delete_payout_without_drive_file_skips_drive(client, admin_headers, drive):
+    drive["fail"] = True
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    assert client.delete(f"/payouts/{payout_id}", headers=admin_headers).status_code == 200
+    assert drive["deleted"] == []
+
+
+class FakeDriveRequest:
+    def __init__(self, result):
+        self.result = result
+
+    def execute(self):
+        return self.result
+
+
+class FakeDriveFiles:
+    """Tiruan service.files() Drive API v3 yang mencatat semua panggilan."""
+
+    def __init__(self, folders):
+        self.folders = dict(folders)  # nama subfolder -> ID
+        self.calls = []
+
+    def list(self, **kwargs):
+        self.calls.append(("list", kwargs))
+        name = re.search(r"name = '([^']+)'", kwargs["q"]).group(1)
+        found = [{"id": self.folders[name]}] if name in self.folders else []
+        return FakeDriveRequest({"files": found})
+
+    def create(self, **kwargs):
+        self.calls.append(("create", kwargs))
+        body = kwargs["body"]
+        if body.get("mimeType") == gdrive.FOLDER_MIME:
+            self.folders[body["name"]] = f"folder-{body['name']}"
+            return FakeDriveRequest({"id": self.folders[body["name"]]})
+        return FakeDriveRequest({"id": "pdf-file-id"})
+
+    def delete(self, **kwargs):
+        self.calls.append(("delete", kwargs))
+        return FakeDriveRequest({})
+
+
+class FakeDriveService:
+    def __init__(self, files):
+        self._files = files
+
+    def files(self):
+        return self._files
+
+
+def test_gdrive_creates_month_subfolder_once_and_uses_all_drives(monkeypatch):
+    monkeypatch.setenv("GDRIVE_SA_FILE", "sa.json")
+    monkeypatch.setenv("GDRIVE_FOLDER_ID", "root-folder")
+    files = FakeDriveFiles({"2026-07": "folder-juli"})
+    monkeypatch.setattr(gdrive, "_service", lambda sa_file: FakeDriveService(files))
+
+    assert gdrive.upload_pdf("Payout Slip - a - Agustus 2026.pdf", b"%PDF-1", "2026-08") == "pdf-file-id"
+    assert gdrive.upload_pdf("Payout Slip - b - Agustus 2026.pdf", b"%PDF-2", "2026-08") == "pdf-file-id"
+    assert gdrive.upload_pdf("Payout Slip - c - Juli 2026.pdf", b"%PDF-3", "2026-07") == "pdf-file-id"
+
+    # Subfolder 2026-08 dibuat sekali; 2026-07 sudah ada.
+    folder_creates = [kw for op, kw in files.calls if op == "create" and kw["body"].get("mimeType") == gdrive.FOLDER_MIME]
+    assert folder_creates == [{
+        "body": {"name": "2026-08", "mimeType": gdrive.FOLDER_MIME, "parents": ["root-folder"]},
+        "fields": "id",
+        "supportsAllDrives": True,
+    }]
+    for op, kw in files.calls:
+        assert kw["supportsAllDrives"] is True, op
+        if op == "list":
+            assert "'root-folder' in parents" in kw["q"]
+            assert kw["includeItemsFromAllDrives"] is True
+    file_creates = [kw for op, kw in files.calls if op == "create" and "media_body" in kw]
+    assert [kw["body"]["parents"] for kw in file_creates] == [["folder-2026-08"], ["folder-2026-08"], ["folder-juli"]]
+    assert file_creates[0]["body"]["name"] == "Payout Slip - a - Agustus 2026.pdf"
+    assert file_creates[0]["media_body"].mimetype() == "application/pdf"
+
+    gdrive.delete_file("pdf-file-id")
+    assert files.calls[-1] == ("delete", {"fileId": "pdf-file-id", "supportsAllDrives": True})

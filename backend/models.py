@@ -471,6 +471,11 @@ class Payout(Base):
     # belum terkirim; admin bisa kirim ulang)
     notified_at = Column(String, nullable=True)
 
+    # File ID slip PDF di Google Drive (gdrive.py). NULL = belum tersimpan
+    # (Drive belum dikonfigurasi / upload gagal / payout lama); admin bisa
+    # upload ulang.
+    drive_file_id = Column(String, nullable=True)
+
     # Rincian per konten (snapshot saat dicatat). Payout lama tidak punya.
     # passive_deletes: baris item dihapus ON DELETE CASCADE di database.
     items = relationship(

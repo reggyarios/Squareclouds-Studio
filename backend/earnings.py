@@ -204,6 +204,7 @@ def serialize_payout(payout: models.Payout, include_internal: bool) -> dict:
             created_by=payout.created_by,
             created_at=payout.created_at,
             notified_at=payout.notified_at,
+            drive_file_id=payout.drive_file_id,
         )
     return item
 

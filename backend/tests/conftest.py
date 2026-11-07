@@ -15,6 +15,9 @@ from pathlib import Path
 TMP_DIR = tempfile.mkdtemp(prefix="squareclouds-test-")
 os.environ["DATABASE_URL"] = f"sqlite:///{Path(TMP_DIR) / 'test.db'}"
 os.environ["SMTP_HOST"] = ""
+# Google Drive tidak pernah dipanggil sungguhan dari tes (lihat fixture drive).
+os.environ["GDRIVE_SA_FILE"] = ""
+os.environ["GDRIVE_FOLDER_ID"] = ""
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
