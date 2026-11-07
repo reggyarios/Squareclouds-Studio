@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   LineChart,
@@ -12,7 +12,8 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
-import { apiFetch } from "@/lib/auth";
+import { PayoutItemsDetail } from "@/components/portal/PayoutItems";
+import { apiDownload, apiFetch } from "@/lib/auth";
 import {
   EWALLET_PROVIDERS,
   MASKED_PAYOUT_FIELDS,
@@ -23,6 +24,7 @@ import {
   formatIDR,
   formatMonth,
   formatUsd,
+  payoutSlipFallbackName,
 } from "@/lib/portal";
 
 type Payout = {
@@ -94,6 +96,10 @@ export default function CreatorDashboard() {
   const [savingPayout, setSavingPayout] = useState(false);
   const [payoutError, setPayoutError] = useState("");
   const [payoutMessage, setPayoutMessage] = useState("");
+  // Riwayat payout: baris yang rinciannya dibuka, dan unduhan slip PDF.
+  const [expandedPayoutId, setExpandedPayoutId] = useState<number | null>(null);
+  const [downloadingPayoutId, setDownloadingPayoutId] = useState<number | null>(null);
+  const [historyError, setHistoryError] = useState("");
 
   const handleLogout = useCallback(() => {
     localStorage.clear();
@@ -104,6 +110,18 @@ export default function CreatorDashboard() {
     (path: string, init?: RequestInit) => apiFetch(path, init, handleLogout),
     [handleLogout]
   );
+
+  const handleDownloadPdf = async (p: Payout) => {
+    setDownloadingPayoutId(p.id);
+    setHistoryError("");
+    try {
+      await apiDownload(`/payouts/${p.id}/pdf`, payoutSlipFallbackName(p.id), handleLogout);
+    } catch (err) {
+      setHistoryError(errMsg(err));
+    } finally {
+      setDownloadingPayoutId(null);
+    }
+  };
 
   useEffect(() => {
     if (!localStorage.getItem("token")) {
@@ -678,6 +696,11 @@ export default function CreatorDashboard() {
           <div className="px-8 py-6 border-b border-gray-50 bg-gray-50/30">
             <h3 className="font-extrabold text-gray-800 text-lg">Riwayat payout</h3>
           </div>
+          {historyError && (
+            <div className="mx-4 md:mx-8 mt-4 rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">
+              {historyError}
+            </div>
+          )}
           {data.payouts.length === 0 ? (
             <div className="p-10 text-center text-gray-400 font-bold">Belum ada payout.</div>
           ) : (
@@ -695,39 +718,69 @@ export default function CreatorDashboard() {
                     </th>
                     <th className="px-4 md:px-8 py-4 text-xs font-bold text-gray-400 uppercase">Metode</th>
                     <th className="px-4 md:px-8 py-4 text-xs font-bold text-gray-400 uppercase">Catatan</th>
+                    <th className="px-4 md:px-8 py-4" />
                   </tr>
                 </thead>
                 <tbody>
                   {data.payouts.map((p) => (
-                    <tr key={p.id} className="border-b border-gray-50 hover:bg-blue-50/30">
-                      <td className="px-4 md:px-8 py-4 text-sm font-bold text-gray-800 whitespace-nowrap">
-                        {p.period_month ? formatMonth(p.period_month) : "-"}
-                      </td>
-                      <td className="px-4 md:px-8 py-4 text-sm font-bold text-gray-700 whitespace-nowrap">
-                        {formatDate(p.paid_at)}
-                      </td>
-                      <td className="px-4 md:px-8 py-4 text-sm font-black text-gray-900 text-right">
-                        {formatUsd(p.amount_usd)}
-                      </td>
-                      <td className="px-4 md:px-8 py-4 text-sm text-gray-700 text-right whitespace-nowrap">
-                        {p.amount_idr !== null ? (
-                          <>
-                            <span className="font-bold">{formatIDR(p.amount_idr)}</span>
-                            {p.idr_rate !== null && (
-                              <span className="block text-xs text-gray-400">
-                                kurs {formatIDR(p.idr_rate)}/$
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td className="px-4 md:px-8 py-4 text-sm text-gray-700">
-                        {PAYOUT_METHOD_LABEL[p.method] || p.method}
-                      </td>
-                      <td className="px-4 md:px-8 py-4 text-sm text-gray-500">{p.note || "-"}</td>
-                    </tr>
+                    <Fragment key={p.id}>
+                      <tr className="border-b border-gray-50 hover:bg-blue-50/30">
+                        <td className="px-4 md:px-8 py-4 text-sm font-bold text-gray-800 whitespace-nowrap">
+                          {p.period_month ? formatMonth(p.period_month) : "-"}
+                        </td>
+                        <td className="px-4 md:px-8 py-4 text-sm font-bold text-gray-700 whitespace-nowrap">
+                          {formatDate(p.paid_at)}
+                        </td>
+                        <td className="px-4 md:px-8 py-4 text-sm font-black text-gray-900 text-right">
+                          {formatUsd(p.amount_usd)}
+                        </td>
+                        <td className="px-4 md:px-8 py-4 text-sm text-gray-700 text-right whitespace-nowrap">
+                          {p.amount_idr !== null ? (
+                            <>
+                              <span className="font-bold">{formatIDR(p.amount_idr)}</span>
+                              {p.idr_rate !== null && (
+                                <span className="block text-xs text-gray-400">
+                                  kurs {formatIDR(p.idr_rate)}/$
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            "-"
+                          )}
+                        </td>
+                        <td className="px-4 md:px-8 py-4 text-sm text-gray-700">
+                          {PAYOUT_METHOD_LABEL[p.method] || p.method}
+                        </td>
+                        <td className="px-4 md:px-8 py-4 text-sm text-gray-500">{p.note || "-"}</td>
+                        <td className="px-4 md:px-8 py-4">
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              aria-expanded={expandedPayoutId === p.id}
+                              onClick={() => setExpandedPayoutId((id) => (id === p.id ? null : p.id))}
+                              className="whitespace-nowrap rounded-lg bg-gray-100 px-3 py-1.5 text-xs font-bold text-gray-700 hover:bg-gray-200"
+                            >
+                              {expandedPayoutId === p.id ? "Rincian ▴" : "Rincian ▾"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDownloadPdf(p)}
+                              disabled={downloadingPayoutId !== null}
+                              className="whitespace-nowrap rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-700 disabled:opacity-50"
+                            >
+                              {downloadingPayoutId === p.id ? "Mengunduh..." : "Unduh PDF"}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {expandedPayoutId === p.id && (
+                        <tr className="border-b border-gray-50 bg-gray-50/60">
+                          <td colSpan={7} className="px-4 md:px-8 py-4">
+                            <PayoutItemsDetail payoutId={p.id} api={api} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

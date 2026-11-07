@@ -2,16 +2,19 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch } from "@/lib/auth";
+import { PayoutItemsDetail, PayoutItemsTable } from "@/components/portal/PayoutItems";
+import { apiDownload, apiFetch } from "@/lib/auth";
 import {
   JOB_OPTIONS,
   PAYOUT_FIELDS,
   PAYOUT_FIELD_LABEL,
   PAYOUT_METHOD_LABEL,
+  type PayoutItem,
   type PayoutMethod,
   formatIDR,
   formatMonth,
   formatUsd,
+  payoutSlipFallbackName,
 } from "@/lib/portal";
 
 type Tab = "undangan" | "kreator" | "konten" | "laporan" | "pengaturan";
@@ -111,6 +114,8 @@ type EarningMonth = {
   share_idr: number | null;
   paid: boolean;
   payout_id: number | null;
+  // Rincian per konten (preview sebelum dicatat); Σ share_usd = share_usd bulan.
+  items: PayoutItem[];
 };
 
 type PayoutForm = { period_month: string; note: string; paid_at: string };
@@ -147,7 +152,7 @@ type Report = {
   by_month: (MoneyTotals & { month: string; by_content: ReportContent[] })[];
 };
 
-type SettingsForm = { paypal_fee_pct: string; idr_rate: string };
+type SettingsForm = { paypal_fee_pct: string; idr_rate: string; company_address: string };
 
 const MAX_CREATOR_SPLIT = 80;
 
@@ -226,7 +231,11 @@ export default function AdminDashboard() {
   // State untuk filter bulan laporan
   const [filterBulan, setFilterBulan] = useState<string>("");
 
-  const [settingsForm, setSettingsForm] = useState<SettingsForm>({ paypal_fee_pct: "", idr_rate: "" });
+  const [settingsForm, setSettingsForm] = useState<SettingsForm>({
+    paypal_fee_pct: "",
+    idr_rate: "",
+    company_address: "",
+  });
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Panel Pendapatan & Payout satu kreator (data null = sedang dimuat).
@@ -239,6 +248,9 @@ export default function AdminDashboard() {
   const [savingPayout, setSavingPayout] = useState(false);
   const [deletingPayoutId, setDeletingPayoutId] = useState<number | null>(null);
   const [notifyingPayoutId, setNotifyingPayoutId] = useState<number | null>(null);
+  // Baris riwayat payout yang rinciannya sedang dibuka.
+  const [expandedPayoutId, setExpandedPayoutId] = useState<number | null>(null);
+  const [downloadingPayoutId, setDownloadingPayoutId] = useState<number | null>(null);
   const [payoutPesan, setPayoutPesan] = useState({ type: "", text: "" });
 
   const [pesan, setPesan] = useState({ type: "", text: "" });
@@ -290,7 +302,11 @@ export default function AdminDashboard() {
 
   const fetchSettings = async () => {
     const data = await api("/settings");
-    setSettingsForm({ paypal_fee_pct: String(data.paypal_fee_pct), idr_rate: String(data.idr_rate) });
+    setSettingsForm({
+      paypal_fee_pct: String(data.paypal_fee_pct),
+      idr_rate: String(data.idr_rate),
+      company_address: data.company_address,
+    });
   };
 
   useEffect(() => {
@@ -486,6 +502,7 @@ export default function AdminDashboard() {
   const openEarnings = (u: Creator) => {
     setEarningsPanel({ user: u, data: null, error: "" });
     setPayoutPesan({ type: "", text: "" });
+    setExpandedPayoutId(null);
     loadEarnings(u);
   };
 
@@ -532,6 +549,18 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleDownloadPayoutPdf = async (p: Payout) => {
+    setDownloadingPayoutId(p.id);
+    setPayoutPesan({ type: "", text: "" });
+    try {
+      await apiDownload(`/payouts/${p.id}/pdf`, payoutSlipFallbackName(p.id), handleLogout);
+    } catch (err) {
+      setPayoutPesan({ type: "error", text: errMsg(err) });
+    } finally {
+      setDownloadingPayoutId(null);
+    }
+  };
+
   const handleDeletePayout = async (p: Payout) => {
     if (!earningsPanel) return;
     if (
@@ -571,11 +600,13 @@ export default function AdminDashboard() {
         body: JSON.stringify({
           paypal_fee_pct: Number(settingsForm.paypal_fee_pct),
           idr_rate: Number(settingsForm.idr_rate),
+          company_address: settingsForm.company_address,
         }),
       });
       setSettingsForm({
         paypal_fee_pct: String(data.data.paypal_fee_pct),
         idr_rate: String(data.data.idr_rate),
+        company_address: data.data.company_address,
       });
       setPesan({ type: "success", text: data.message });
       // Gross/net konten dan laporan bergantung pada fee PayPal.
@@ -1282,6 +1313,22 @@ export default function AdminDashboard() {
                   payout lama tidak berubah.
                 </span>
               </label>
+              <label className="block">
+                <span className="text-sm font-bold text-gray-800">Alamat perusahaan (slip payout)</span>
+                <textarea
+                  required
+                  rows={4}
+                  maxLength={300}
+                  value={settingsForm.company_address}
+                  onChange={(e) => setSettingsForm((s) => ({ ...s, company_address: e.target.value }))}
+                  className="mt-1 w-full rounded-xl border border-gray-300 px-4 py-2 text-sm focus:border-blue-500 focus:outline-none"
+                />
+                <span className="mt-1 block text-xs text-gray-500">
+                  Tampil di blok pengirim slip PDF, di bawah nama dan email Squareclouds Studio. Satu
+                  baris per baris alamat, maksimal 5 baris. Berlaku juga untuk slip lama yang diunduh
+                  ulang.
+                </span>
+              </label>
               <button
                 type="submit"
                 disabled={savingSettings}
@@ -1297,7 +1344,7 @@ export default function AdminDashboard() {
       {/* MODAL PENDAPATAN & PAYOUT */}
       {earningsPanel && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white p-6 md:p-8 rounded-3xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+          <div className="bg-white p-6 md:p-8 rounded-3xl max-w-5xl w-full max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-start gap-4 mb-6">
               <div>
                 <h3 className="text-xl font-bold">Pendapatan & Payout</h3>
@@ -1449,26 +1496,17 @@ export default function AdminDashboard() {
                       </select>
                     </label>
                     {selectedPeriod && (
-                      <p className="mt-2 rounded-xl border border-blue-100 bg-white px-3 py-2 text-sm">
-                        <span className="text-gray-500">Akan dicatat: </span>
-                        <span className="font-black text-gray-900">{formatUsd(selectedPeriod.share_usd)}</span>
-                        {selectedPeriod.share_idr !== null && (
-                          <>
-                            <span className="text-gray-400"> · </span>
-                            <span className="font-black text-gray-900">
-                              {formatIDR(selectedPeriod.share_idr)}
-                            </span>
-                            <span className="text-xs text-gray-500">
-                              {" "}
-                              (kurs {formatIDR(earningsData.idr_rate)}/$)
-                            </span>
-                          </>
-                        )}
-                        <span className="block text-xs text-gray-500">
-                          Bagian kreator {formatMonth(selectedPeriod.month)} ·{" "}
-                          {selectedPeriod.units.toLocaleString("id-ID")} unit
-                        </span>
-                      </p>
+                      <div className="mt-2 rounded-xl border border-blue-100 bg-white px-3 py-2">
+                        <p className="mb-1 text-xs font-bold text-gray-500">
+                          Akan dicatat: bagian kreator {formatMonth(selectedPeriod.month)} per konten
+                        </p>
+                        <PayoutItemsTable
+                          items={selectedPeriod.items}
+                          totalUsd={selectedPeriod.share_usd}
+                          totalIdr={selectedPeriod.share_idr}
+                          idrRate={selectedPeriod.share_idr !== null ? earningsData.idr_rate : null}
+                        />
+                      </div>
                     )}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1546,72 +1584,104 @@ export default function AdminDashboard() {
                           </tr>
                         ) : (
                           earningsData.payouts.map((p) => (
-                            <tr key={p.id} className="border-t border-gray-50 align-top">
-                              <td className="px-4 py-2 whitespace-nowrap font-bold text-gray-800">
-                                {p.period_month ? formatMonth(p.period_month) : "-"}
-                              </td>
-                              <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
-                              <td className="px-4 py-2 text-right font-black text-gray-900">
-                                {formatUsd(p.amount_usd)}
-                              </td>
-                              <td className="px-4 py-2 text-right whitespace-nowrap">
-                                {p.amount_idr !== null ? (
-                                  <>
-                                    {formatIDR(p.amount_idr)}
-                                    {p.idr_rate !== null && (
-                                      <span className="block text-xs text-gray-400">
-                                        kurs {formatIDR(p.idr_rate)}/$
-                                      </span>
-                                    )}
-                                  </>
-                                ) : (
-                                  "-"
-                                )}
-                              </td>
-                              <td className="px-4 py-2">
-                                <span className="font-bold">
-                                  {PAYOUT_METHOD_LABEL[p.method] || p.method}
-                                </span>
-                                <span className="block text-xs text-gray-500 break-all">
-                                  {payoutDetailsText(p.method, p.details)}
-                                </span>
-                              </td>
-                              <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
-                              <td className="px-4 py-2">
-                                {p.notified_at ? (
-                                  <span
-                                    title={`Terkirim ${formatDateTime(p.notified_at)}`}
-                                    className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700"
-                                  >
-                                    ✓ Email terkirim
+                            <Fragment key={p.id}>
+                              <tr className="border-t border-gray-50 align-top">
+                                <td className="px-4 py-2 whitespace-nowrap font-bold text-gray-800">
+                                  {p.period_month ? formatMonth(p.period_month) : "-"}
+                                </td>
+                                <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
+                                <td className="px-4 py-2 text-right font-black text-gray-900">
+                                  {formatUsd(p.amount_usd)}
+                                </td>
+                                <td className="px-4 py-2 text-right whitespace-nowrap">
+                                  {p.amount_idr !== null ? (
+                                    <>
+                                      {formatIDR(p.amount_idr)}
+                                      {p.idr_rate !== null && (
+                                        <span className="block text-xs text-gray-400">
+                                          kurs {formatIDR(p.idr_rate)}/$
+                                        </span>
+                                      )}
+                                    </>
+                                  ) : (
+                                    "-"
+                                  )}
+                                </td>
+                                <td className="px-4 py-2">
+                                  <span className="font-bold">
+                                    {PAYOUT_METHOD_LABEL[p.method] || p.method}
                                   </span>
-                                ) : (
-                                  <div className="flex flex-col items-start gap-1">
-                                    <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
-                                      ✕ Email gagal
+                                  <span className="block text-xs text-gray-500 break-all">
+                                    {payoutDetailsText(p.method, p.details)}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
+                                <td className="px-4 py-2">
+                                  {p.notified_at ? (
+                                    <span
+                                      title={`Terkirim ${formatDateTime(p.notified_at)}`}
+                                      className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700"
+                                    >
+                                      ✓ Email terkirim
                                     </span>
+                                  ) : (
+                                    <div className="flex flex-col items-start gap-1">
+                                      <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
+                                        ✕ Email gagal
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleResendPayoutEmail(p)}
+                                        disabled={notifyingPayoutId !== null}
+                                        className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
+                                      >
+                                        {notifyingPayoutId === p.id ? "Mengirim..." : "Kirim ulang email"}
+                                      </button>
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="px-4 py-2">
+                                  {/* Ditumpuk supaya tabel tetap muat di modal. */}
+                                <div className="flex flex-col items-stretch gap-1.5">
                                     <button
                                       type="button"
-                                      onClick={() => handleResendPayoutEmail(p)}
-                                      disabled={notifyingPayoutId !== null}
-                                      className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
+                                      aria-expanded={expandedPayoutId === p.id}
+                                      onClick={() =>
+                                        setExpandedPayoutId((id) => (id === p.id ? null : p.id))
+                                      }
+                                      className="whitespace-nowrap bg-gray-100 text-gray-700 px-3 py-1 rounded-lg text-xs font-bold hover:bg-gray-200"
                                     >
-                                      {notifyingPayoutId === p.id ? "Mengirim..." : "Kirim ulang email"}
+                                      {expandedPayoutId === p.id ? "Rincian ▴" : "Rincian ▾"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDownloadPayoutPdf(p)}
+                                      disabled={downloadingPayoutId !== null}
+                                      className="whitespace-nowrap bg-blue-50 text-blue-600 px-3 py-1 rounded-lg text-xs font-bold hover:bg-blue-100 disabled:opacity-50"
+                                    >
+                                      {downloadingPayoutId === p.id ? "Mengunduh..." : "PDF"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeletePayout(p)}
+                                      disabled={deletingPayoutId !== null}
+                                      className="bg-red-50 text-red-600 px-3 py-1 rounded-lg text-xs font-bold disabled:opacity-50"
+                                    >
+                                      {deletingPayoutId === p.id ? "Menghapus..." : "Hapus"}
                                     </button>
                                   </div>
-                                )}
-                              </td>
-                              <td className="px-4 py-2 text-right">
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeletePayout(p)}
-                                  disabled={deletingPayoutId !== null}
-                                  className="bg-red-50 text-red-600 px-3 py-1 rounded-lg text-xs font-bold disabled:opacity-50"
-                                >
-                                  {deletingPayoutId === p.id ? "Menghapus..." : "Hapus"}
-                                </button>
-                              </td>
-                            </tr>
+                                </td>
+                              </tr>
+                              {expandedPayoutId === p.id && (
+                                <tr className="bg-gray-50/60">
+                                  <td colSpan={8} className="px-4 py-3">
+                                    <div className="max-w-lg">
+                                      <PayoutItemsDetail payoutId={p.id} api={api} />
+                                    </div>
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
                           ))
                         )}
                       </tbody>
