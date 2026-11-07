@@ -1,6 +1,6 @@
 """Kosongkan data portal kreator supaya pathway_bot.py bisa mulai dari nol.
 
-DIHAPUS : daily_sales, sales_transactions, earning_history, payouts,
+DIHAPUS : daily_sales, sales_transactions, earning_history, payouts (+ payout_items),
           creator_splits, contents, dan semua user dengan role selain "Admin".
 TETAP   : akun Admin, settings (fee PayPal & kurs), dan semua tabel CMS (cms_*).
 
@@ -24,7 +24,7 @@ with engine.connect() as conn:
     counts = {
         t: conn.execute(text(f'SELECT COUNT(*) FROM "{t}"')).scalar()
         for t in ("daily_sales", "sales_transactions", "earning_history",
-                  "payouts", "creator_splits", "contents")
+                  "payout_items", "payouts", "creator_splits", "contents")
     }
     counts["users (non-admin)"] = conn.execute(
         text("SELECT COUNT(*) FROM users WHERE role <> 'Admin'")
@@ -49,12 +49,14 @@ with engine.begin() as conn:
     conn.execute(text("DELETE FROM sales_transactions"))
     conn.execute(text("DELETE FROM earning_history"))
     # Sebelum users: payouts.user_id (dan created_by) mengacu ke users.
+    # payout_items ikut terhapus (ON DELETE CASCADE); ditulis eksplisit supaya jelas.
+    conn.execute(text("DELETE FROM payout_items"))
     conn.execute(text("DELETE FROM payouts"))
     conn.execute(text("DELETE FROM creator_splits"))
     conn.execute(text("DELETE FROM contents"))
     conn.execute(text("DELETE FROM users WHERE role <> 'Admin'"))
     for t in ("daily_sales", "sales_transactions", "earning_history",
-              "payouts", "creator_splits", "contents"):
+              "payout_items", "payouts", "creator_splits", "contents"):
         conn.execute(text(
             f"SELECT setval(pg_get_serial_sequence('{t}', 'id'), 1, false)"
         ))

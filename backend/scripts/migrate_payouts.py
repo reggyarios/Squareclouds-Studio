@@ -33,6 +33,10 @@ Tabel baru:
                                  tetap NULL (tanpa periode)
                 plus unique index uq_payouts_user_period (user_id,
                 period_month): satu payout per kreator per bulan
+    payout_items
+                rincian payout per konten (snapshot nama, unit, bagian, split),
+                ON DELETE CASCADE dari payouts. Payout yang dicatat sebelum
+                tabel ini ada tidak punya rincian.
 """
 import sys
 from datetime import datetime, timezone
@@ -91,9 +95,9 @@ with engine.begin() as conn:
         print(f"  {reset} baris bernilai default 0 di-set NULL (diisi lagi oleh pathway_bot.py --full)")
     Base.metadata.create_all(
         bind=conn,
-        tables=[models.Setting.__table__, models.Payout.__table__],
+        tables=[models.Setting.__table__, models.Payout.__table__, models.PayoutItem.__table__],
     )
-    print("tabel settings, payouts ok")
+    print("tabel settings, payouts, payout_items ok")
     # Setelah create_all: di DB baru tabel payouts baru ada di titik ini (sudah
     # dengan kolomnya); di DB lama kolom ini ditambahkan ke tabel yang ada.
     conn.execute(text('ALTER TABLE payouts ADD COLUMN IF NOT EXISTS "notified_at" VARCHAR'))

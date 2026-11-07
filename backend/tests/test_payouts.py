@@ -286,7 +286,7 @@ def test_shift_month_and_last_complete_month(client):
 def test_creator_months_from_first_earning_to_last_complete_month(client):
     with SessionLocal() as db:
         creator = add_creator(db, payout_method="bank")
-        add_content(db, splits=[(creator, 30)], sales=[
+        content = add_content(db, splits=[(creator, 30)], sales=[
             ("2026-06-10", 3, 0.0, 0.0),      # unit tanpa pendapatan: belum awal rentang
             ("2026-07-05", 10, 100.0, 80.0),  # 22,8
             # Agustus kosong: tetap ada (0) karena di dalam rentang.
@@ -296,12 +296,19 @@ def test_creator_months_from_first_earning_to_last_complete_month(client):
         ])
         july = add_payout(db, creator, 22.8, period_month="2026-07")
 
+        def items(units, share):
+            return [{"content_id": content.id, "name": "Royal Mansion", "units": units, "share_usd": share}]
+
         months = earnings.creator_months(db, creator)
         assert months == [
-            {"month": "2026-07", "units": 10, "share_usd": 22.8, "share_idr": 376200.0, "paid": True, "payout_id": july.id},
-            {"month": "2026-08", "units": 0, "share_usd": 0.0, "share_idr": 0.0, "paid": False, "payout_id": None},
-            {"month": "2026-09", "units": 5, "share_usd": 11.4, "share_idr": 188100.0, "paid": False, "payout_id": None},
-            {"month": "2026-10", "units": 1, "share_usd": 2.28, "share_idr": 37620.0, "paid": False, "payout_id": None},
+            {"month": "2026-07", "units": 10, "share_usd": 22.8, "share_idr": 376200.0, "paid": True,
+             "payout_id": july.id, "items": items(10, 22.8)},
+            {"month": "2026-08", "units": 0, "share_usd": 0.0, "share_idr": 0.0, "paid": False,
+             "payout_id": None, "items": []},
+            {"month": "2026-09", "units": 5, "share_usd": 11.4, "share_idr": 188100.0, "paid": False,
+             "payout_id": None, "items": items(5, 11.4)},
+            {"month": "2026-10", "units": 1, "share_usd": 2.28, "share_idr": 37620.0, "paid": False,
+             "payout_id": None, "items": items(1, 2.28)},
         ]
 
         for method in ("paypal", None):
@@ -320,6 +327,36 @@ def test_creator_months_empty_without_complete_earning_month(client):
         # Hanya bulan berjalan yang punya pendapatan.
         add_content(db, splits=[(creator, 30)], sales=[("2026-11-02", 10, 100.0, 80.0)])
         assert earnings.creator_months(db, creator) == []
+
+
+def test_allocate_cents_sums_to_rounded_total():
+    # Dibulatkan satu per satu: 0,33 × 3 = 0,99 dan 0,28 × 2 = 0,56 (meleset sesen).
+    assert earnings.allocate_cents([1 / 3, 1 / 3, 1 / 3]) == [0.34, 0.33, 0.33]
+    assert earnings.allocate_cents([0.285, 0.285]) == [0.29, 0.28]
+    assert earnings.allocate_cents([22.8, 11.4]) == [22.8, 11.4]
+    assert earnings.allocate_cents([0.0, 0.0]) == [0.0, 0.0]
+    assert earnings.allocate_cents([]) == []
+    for values in ([0.004] * 7, [1.005, 2.675, 0.125], [123.456, 0.001, 9.999]):
+        cents = sum(round(v * 100) for v in earnings.allocate_cents(values))
+        assert cents == round(earnings.money(sum(values)) * 100), values
+
+
+def test_creator_months_items_per_content(client):
+    with SessionLocal() as db:
+        creator = add_creator(db)
+        # Masing-masing 1 × 0,95 × 30% = 0,285: dibulatkan sendiri-sendiri jadi
+        # 0,28 + 0,28, padahal totalnya 0,57.
+        b = add_content(db, "Konten B", splits=[(creator, 30)], sales=[("2026-10-05", 1, 1.25, 1.0)])
+        a = add_content(db, "Konten A", splits=[(creator, 30)], sales=[("2026-10-06", 1, 1.25, 1.0)])
+        add_content(db, "Tanpa Penjualan Oktober", splits=[(creator, 30)], sales=[("2026-11-05", 2, 2.5, 2.0)])
+
+        [october] = earnings.creator_months(db, creator)
+        assert october["share_usd"] == 0.57
+        assert october["units"] == 2
+        assert october["items"] == [
+            {"content_id": a.id, "name": "Konten A", "units": 1, "share_usd": 0.29},
+            {"content_id": b.id, "name": "Konten B", "units": 1, "share_usd": 0.28},
+        ]
 
 
 def test_unique_payout_per_creator_per_month(client):
@@ -350,7 +387,7 @@ def login(client, email="creator@example.com"):
 OCTOBER_SALE = ("2026-10-05", 10, 100.0, 80.0)  # gross 100, net80 80 -> share 30% = 22,8
 
 
-def seed_creator(method=None, details=None, sales=(OCTOBER_SALE,), data_until="2026-11-05"):
+def seed_creator(method=None, details=None, sales=(OCTOBER_SALE,), data_until="2026-11-05", username="kreator"):
     """Kreator Active dengan satu konten (split 30%); default share Oktober 2026 = 22,8.
 
     data_until: tanggal penjualan terakhir di daily_sales, lewat konten lain
@@ -360,6 +397,7 @@ def seed_creator(method=None, details=None, sales=(OCTOBER_SALE,), data_until="2
     with SessionLocal() as db:
         creator = add_creator(
             db,
+            username=username,
             payout_method=method,
             payout_details=None if details is None else json.dumps(details),
         )
@@ -433,8 +471,10 @@ def test_user_earnings_has_internal_fields_and_full_details(client, admin_header
     assert data["by_content"][0]["net_usd"] == 76.0
     assert data["by_content"][0]["split_pct"] == 30
     assert data["outstanding_idr"] == 376200.0
+    content_id = data["by_content"][0]["content_id"]
     assert data["months"] == [
-        {"month": "2026-10", "units": 10, "share_usd": 22.8, "share_idr": 376200.0, "paid": False, "payout_id": None}
+        {"month": "2026-10", "units": 10, "share_usd": 22.8, "share_idr": 376200.0, "paid": False, "payout_id": None,
+         "items": [{"content_id": content_id, "name": "Royal Mansion", "units": 10, "share_usd": 22.8}]}
     ]
 
     with SessionLocal() as db:
@@ -626,6 +666,85 @@ def test_delete_creator_also_deletes_payouts(client, admin_headers):
     assert client.delete(f"/users/{creator_id}", headers=admin_headers).status_code == 200
     with SessionLocal() as db:
         assert db.query(models.Payout).count() == 0
+        assert db.query(models.PayoutItem).count() == 0
+
+
+def seed_two_content_creator():
+    """Kreator bank dengan dua konten di Oktober, masing-masing share 0,285
+    (total 0,57): pembulatan per konten harus tetap pas dengan total."""
+    with SessionLocal() as db:
+        creator = add_creator(db, username="kreator", payout_method="bank", payout_details=json.dumps(BANK))
+        add_content(db, "Konten B", splits=[(creator, 30)], sales=[("2026-10-05", 1, 1.25, 1.0)])
+        add_content(db, "Konten A", splits=[(creator, 30)], sales=[("2026-10-06", 1, 1.25, 1.0)])
+        add_content(db, "Konten Tanpa Kreator", sales=[("2026-11-05", 1, 1.0, 0.8)])
+        db.commit()
+        return creator.id
+
+
+def test_payout_items_saved_and_sum_to_amount(client, admin_headers):
+    creator_id = seed_two_content_creator()
+    res = post_payout(client, admin_headers, creator_id)
+    assert res.status_code == 201, res.text
+    payout_id = res.json()["data"]["id"]
+
+    with SessionLocal() as db:
+        payout = db.get(models.Payout, payout_id)
+        assert payout.amount_usd == 0.57
+        rows = [(i.content_name, i.units, i.share_usd, i.split_pct) for i in payout.items]
+        assert rows == [("Konten A", 1, 0.29, 30.0), ("Konten B", 1, 0.28, 30.0)]
+        assert round(sum(i.share_usd for i in payout.items), 2) == payout.amount_usd
+        content_ids = {c.name: c.id for c in db.query(models.Content)}
+        assert [i.content_id for i in payout.items] == [content_ids["Konten A"], content_ids["Konten B"]]
+
+    # Snapshot: ganti nama konten dan split setelahnya tidak mengubah rincian.
+    with SessionLocal() as db:
+        content = db.query(models.Content).filter(models.Content.name == "Konten A").one()
+        content.name = "Konten A (baru)"
+        db.query(models.CreatorSplit).update({models.CreatorSplit.split_percentage: 50})
+        db.commit()
+    items = client.get(f"/payouts/{payout_id}", headers=admin_headers).json()["items"]
+    assert [(i["name"], i["share_usd"], i["split_pct"]) for i in items] == [
+        ("Konten A", 0.29, 30.0),
+        ("Konten B", 0.28, 30.0),
+    ]
+
+
+def test_get_payout_detail_access(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id, note="Oktober").json()["data"]["id"]
+    with SessionLocal() as db:
+        add_creator(db, "lain@example.com", "Kreator Lain", username="lain")
+        db.commit()
+    url = f"/payouts/{payout_id}"
+
+    admin_view = client.get(url, headers=admin_headers).json()
+    assert admin_view["period_month"] == "2026-10"
+    assert admin_view["details"] == BANK
+    assert admin_view["items"][0]["split_pct"] == 30.0
+
+    res = client.get(url, headers=login(client))
+    assert res.status_code == 200, res.text
+    owner_view = res.json()
+    assert owner_view["items"] == [
+        {"content_id": admin_view["items"][0]["content_id"], "name": "Royal Mansion", "units": 10, "share_usd": 22.8}
+    ]
+    assert owner_view["note"] == "Oktober"
+    leaked = [k for k in all_keys(owner_view) if any(part in k.lower() for part in FORBIDDEN_KEY_PARTS)]
+    assert leaked == []
+    assert "details" not in owner_view
+    assert BANK["account_number"] not in str(owner_view)
+
+    assert client.get(url, headers=login(client, "lain@example.com")).status_code == 403
+    assert client.get(url).status_code == 401
+    assert client.get("/payouts/999", headers=admin_headers).status_code == 404
+
+
+def test_deleting_payout_deletes_its_items(client, admin_headers):
+    creator_id = seed_two_content_creator()
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    assert client.delete(f"/payouts/{payout_id}", headers=admin_headers).status_code == 200
+    with SessionLocal() as db:
+        assert db.query(models.PayoutItem).count() == 0
 
 
 def test_admin_reports_and_contents_use_overview(client, admin_headers):
@@ -762,9 +881,10 @@ def test_payout_idr_snapshot_survives_rate_change(client, admin_headers):
     assert data["idr_rate"] == 17000.0
     assert data["outstanding_idr"] == 581400.0  # 34,2 × 17.000
     # Bulan yang belum dibayar ikut kurs baru: 11,4 × 17.000.
-    assert data["months"][1] == {
-        "month": "2026-10", "units": 5, "share_usd": 11.4, "share_idr": 193800.0, "paid": False, "payout_id": None
-    }
+    october = data["months"][1]
+    assert (october["month"], october["share_usd"], october["share_idr"], october["paid"]) == (
+        "2026-10", 11.4, 193800.0, False
+    )
 
 
 def test_settings_reject_non_numeric(client, admin_headers):

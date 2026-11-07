@@ -465,12 +465,53 @@ class Payout(Base):
     # belum terkirim; admin bisa kirim ulang)
     notified_at = Column(String, nullable=True)
 
+    # Rincian per konten (snapshot saat dicatat). Payout lama tidak punya.
+    # passive_deletes: baris item dihapus ON DELETE CASCADE di database.
+    items = relationship(
+        "PayoutItem",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        order_by="PayoutItem.id",
+    )
+
     # Satu payout per kreator per bulan. NULL tidak bentrok (payout lama).
     # Index (bukan UniqueConstraint) supaya create_all dan
     # scripts/migrate_payouts.py membuat objek yang sama dengan nama yang sama.
     __table_args__ = (
         Index("uq_payouts_user_period", "user_id", "period_month", unique=True),
     )
+
+
+class PayoutItem(Base):
+    """Rincian satu payout per konten, disalin dari earnings.creator_months
+    saat payout dicatat. Σ share_usd = payouts.amount_usd (persis, per sen)."""
+
+    __tablename__ = "payout_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    payout_id = Column(
+        Integer,
+        ForeignKey("payouts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    content_id = Column(
+        Integer,
+        ForeignKey("contents.id"),
+        nullable=False,
+    )
+
+    # Snapshot saat dibayar (nama konten bisa berubah lewat sinkron Pathway)
+    content_name = Column(String, nullable=False)
+
+    units = Column(Integer, nullable=False)
+
+    share_usd = Column(Float, nullable=False)
+
+    # Snapshot split kreator saat dibayar. Internal: tidak pernah dikirim ke kreator.
+    split_pct = Column(Float, nullable=False)
 
 
 # ============================================================

@@ -1078,6 +1078,21 @@ def create_payout(
         created_by=current_user.id,
         created_at=iso_utc(datetime.now(timezone.utc)),
     )
+    # Rincian per konten disalin dari bulan itu; Σ share_usd = amount_usd.
+    splits = dict(
+        db.query(models.CreatorSplit.content_id, models.CreatorSplit.split_percentage)
+        .filter(models.CreatorSplit.user_id == user.id)
+    )
+    payout.items = [
+        models.PayoutItem(
+            content_id=item["content_id"],
+            content_name=item["name"],
+            units=item["units"],
+            share_usd=item["share_usd"],
+            split_pct=splits[item["content_id"]],
+        )
+        for item in month["items"]
+    ]
     db.add(payout)
     try:
         db.commit()
@@ -1099,6 +1114,31 @@ def create_payout(
         ),
         "notified": notified,
         "data": earnings.serialize_payout(payout, include_internal=True),
+    }
+
+
+def get_payout_or_error(db: Session, payout_id: int, current_user: models.User) -> models.Payout:
+    """Payout untuk admin, atau untuk kreator pemiliknya (kreator lain 403)."""
+    payout = db.get(models.Payout, payout_id)
+    if not payout:
+        raise HTTPException(status_code=404, detail="Payout tidak ditemukan")
+    if current_user.role != "Admin" and payout.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Akses ditolak.")
+    return payout
+
+
+@app.get("/payouts/{payout_id}")
+def get_payout_detail(
+    payout_id: int,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    payout = get_payout_or_error(db, payout_id, current_user)
+    # Kreator: tanpa snapshot tujuan, field admin, maupun split %.
+    internal = current_user.role == "Admin"
+    return {
+        **earnings.serialize_payout(payout, include_internal=internal),
+        "items": earnings.serialize_payout_items(payout, include_internal=internal),
     }
 
 

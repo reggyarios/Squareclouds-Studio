@@ -13,6 +13,7 @@ Rantai uang (docs/payout-v2.2.md §0):
 Angka dihitung tanpa pembulatan; pembulatan ke 2 desimal hanya di output (`money`).
 """
 import json
+import math
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, literal_column
@@ -33,6 +34,23 @@ def money(value: float) -> float:
     return round(value, 2) + 0.0
 
 
+def allocate_cents(values: list[float]) -> list[float]:
+    """Bulatkan tiap nilai ke sen sehingga jumlahnya persis money(sum(values)).
+
+    Membulatkan satu per satu bisa meleset sesen dari total yang dibulatkan
+    (3 × 1/3 -> 0,33 × 3 = 0,99, padahal total 1,00). Metode sisa terbesar:
+    semua dibulatkan ke bawah, lalu sen yang kurang diberikan ke nilai dengan
+    sisa pecahan terbesar (seri: urutan input).
+    """
+    total_cents = round(money(sum(values)) * 100)
+    scaled = [v * 100 for v in values]
+    cents = [math.floor(s) for s in scaled]
+    by_remainder = sorted(range(len(values)), key=lambda i: scaled[i] - cents[i], reverse=True)
+    for i in by_remainder[: max(total_cents - sum(cents), 0)]:
+        cents[i] += 1
+    return [c / 100 for c in cents]
+
+
 def net_from_net80(net80: float, fee_pct: float) -> float:
     return net80 * (1 - fee_pct / 100)
 
@@ -43,6 +61,11 @@ def creator_share(net: float, split_pct: float) -> float:
 
 def to_idr(usd: float, rate: float) -> float:
     return usd * rate
+
+
+def format_usd(value: float) -> str:
+    """22.8 -> "$22.80" (sama dengan formatUsd di frontend)."""
+    return f"${value:,.2f}"
 
 
 def format_idr(value: float) -> str:
@@ -175,6 +198,22 @@ def serialize_payout(payout: models.Payout, include_internal: bool) -> dict:
     return item
 
 
+def serialize_payout_items(payout: models.Payout, include_internal: bool) -> list[dict]:
+    """Rincian per konten. split_pct hanya untuk admin (include_internal)."""
+    result = []
+    for row in payout.items:
+        item = {
+            "content_id": row.content_id,
+            "name": row.content_name,
+            "units": row.units,
+            "share_usd": money(row.share_usd),
+        }
+        if include_internal:
+            item["split_pct"] = row.split_pct
+        result.append(item)
+    return result
+
+
 def creator_summary(db: Session, user: models.User, include_internal: bool) -> dict:
     """Pendapatan, pembayaran, dan saldo tertunda satu kreator (USD, plus
     perkiraan rupiah kalau metode payout-nya bank/e-wallet).
@@ -296,24 +335,48 @@ def creator_months(db: Session, user: models.User) -> list[dict]:
     POST /payouts. share_idr = share_usd × kurs saat ini, hanya untuk metode
     bank/e-wallet (None untuk PayPal/belum diisi); juga persis jumlah rupiah
     yang dicatat.
+
+    items = rincian per konten yang terjual di bulan itu, urut nama:
+    {content_id, name, units, share_usd}. Σ items.share_usd = share_usd persis
+    (allocate_cents); disalin ke payout_items saat payout dicatat.
     """
     last_complete = last_complete_month(db)
     if last_complete is None:
         return []
 
-    splits = dict(
-        db.query(models.CreatorSplit.content_id, models.CreatorSplit.split_percentage)
-        .filter(models.CreatorSplit.user_id == user.id)
-    )
+    links = {
+        content_id: (pct, name)
+        for content_id, pct, name in (
+            db.query(models.CreatorSplit.content_id, models.CreatorSplit.split_percentage, models.Content.name)
+            .join(models.Content, models.Content.id == models.CreatorSplit.content_id)
+            .filter(models.CreatorSplit.user_id == user.id)
+        )
+    }
+    # {month: {content_id: {content_id, name, units, share}}}; content_rows
+    # memberi satu baris per (konten, bulan).
     totals = {}
     for row in content_rows(db, user_id=user.id):
         if row["month"] > last_complete:
             continue
-        bucket = totals.setdefault(row["month"], {"units": 0, "share": 0.0})
-        bucket["units"] += row["units"]
-        bucket["share"] += creator_share(row["net_usd"], splits[row["content_id"]])
+        pct, name = links[row["content_id"]]
+        totals.setdefault(row["month"], {})[row["content_id"]] = {
+            "content_id": row["content_id"],
+            "name": name,
+            "units": row["units"],
+            "share": creator_share(row["net_usd"], pct),
+        }
 
-    earning = sorted(m for m, b in totals.items() if money(b["share"]) > 0)
+    def month_items(month: str) -> list[dict]:
+        contents = sorted(totals.get(month, {}).values(), key=lambda c: (c["name"].lower(), c["content_id"]))
+        amounts = allocate_cents([c["share"] for c in contents])
+        return [
+            {"content_id": c["content_id"], "name": c["name"], "units": c["units"], "share_usd": amount}
+            for c, amount in zip(contents, amounts)
+        ]
+
+    earning = sorted(
+        m for m, contents in totals.items() if money(sum(c["share"] for c in contents.values())) > 0
+    )
     if not earning:
         return []
 
@@ -327,15 +390,17 @@ def creator_months(db: Session, user: models.User) -> list[dict]:
     result = []
     month = earning[0]
     while month <= last_complete:
-        bucket = totals.get(month, {"units": 0, "share": 0.0})
-        share_usd = money(bucket["share"])
+        items = month_items(month)
+        # Dari items (bukan money(Σ share) lagi) supaya total = Σ rincian persis.
+        share_usd = money(sum(i["share_usd"] for i in items))
         result.append({
             "month": month,
-            "units": bucket["units"],
+            "units": sum(i["units"] for i in items),
             "share_usd": share_usd,
             "share_idr": money(to_idr(share_usd, rate)) if user.payout_method in IDR_METHODS else None,
             "paid": month in paid,
             "payout_id": paid.get(month),
+            "items": items,
         })
         month = shift_month(month, 1)
     return result
