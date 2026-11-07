@@ -27,6 +27,8 @@ import {
 
 type Payout = {
   id: number;
+  // YYYY-MM; null = payout lama sebelum payout per bulan.
+  period_month: string | null;
   paid_at: string;
   amount_usd: number;
   idr_rate: number | null;
@@ -683,6 +685,7 @@ export default function CreatorDashboard() {
               <table className="w-full text-left">
                 <thead className="bg-white border-b border-gray-100">
                   <tr>
+                    <th className="px-4 md:px-8 py-4 text-xs font-bold text-gray-400 uppercase">Periode</th>
                     <th className="px-4 md:px-8 py-4 text-xs font-bold text-gray-400 uppercase">Tanggal</th>
                     <th className="px-4 md:px-8 py-4 text-xs font-bold text-gray-400 uppercase text-right">
                       Jumlah
@@ -697,6 +700,9 @@ export default function CreatorDashboard() {
                 <tbody>
                   {data.payouts.map((p) => (
                     <tr key={p.id} className="border-b border-gray-50 hover:bg-blue-50/30">
+                      <td className="px-4 md:px-8 py-4 text-sm font-bold text-gray-800 whitespace-nowrap">
+                        {p.period_month ? formatMonth(p.period_month) : "-"}
+                      </td>
                       <td className="px-4 md:px-8 py-4 text-sm font-bold text-gray-700 whitespace-nowrap">
                         {formatDate(p.paid_at)}
                       </td>

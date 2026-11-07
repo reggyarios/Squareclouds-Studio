@@ -60,6 +60,8 @@ type SplitRow = { user_id: number; name: string; checked: boolean; percentage: s
 
 type Payout = {
   id: number;
+  // YYYY-MM; null = payout lama sebelum payout per bulan.
+  period_month: string | null;
   paid_at: string;
   amount_usd: number;
   idr_rate: number | null;
@@ -93,11 +95,33 @@ type CreatorEarnings = {
     share_usd: number;
   }[];
   payouts: Payout[];
+  // Bulan lengkap (earnings.creator_months), urut lama ke baru. Bulan
+  // berjalan tidak pernah ada di sini.
+  months: EarningMonth[];
   payout_method: PayoutMethod | null;
   payout_details: Record<string, string> | null;
 };
 
-type PayoutForm = { amount: string; note: string; paid_at: string };
+type EarningMonth = {
+  month: string;
+  units: number;
+  // Persis jumlah yang dicatat POST /payouts untuk bulan ini.
+  share_usd: number;
+  // null untuk PayPal / metode belum diisi.
+  share_idr: number | null;
+  paid: boolean;
+  payout_id: number | null;
+};
+
+type PayoutForm = { period_month: string; note: string; paid_at: string };
+
+// Bulan yang bisa dipilih di form Catat pembayaran (sama dengan syarat
+// POST /payouts: belum dibayar dan ada pendapatan).
+const payableMonths = (months: EarningMonth[]) => months.filter((m) => !m.paid && m.share_usd > 0);
+
+const periodOptionLabel = (m: EarningMonth) =>
+  `${formatMonth(m.month)} — ${formatUsd(m.share_usd)}` +
+  (m.share_idr !== null ? ` (≈ ${formatIDR(m.share_idr)})` : "");
 
 type MoneyTotals = {
   units: number;
@@ -211,7 +235,7 @@ export default function AdminDashboard() {
     data: CreatorEarnings | null;
     error: string;
   } | null>(null);
-  const [payoutForm, setPayoutForm] = useState<PayoutForm>({ amount: "", note: "", paid_at: "" });
+  const [payoutForm, setPayoutForm] = useState<PayoutForm>({ period_month: "", note: "", paid_at: "" });
   const [savingPayout, setSavingPayout] = useState(false);
   const [deletingPayoutId, setDeletingPayoutId] = useState<number | null>(null);
   const [notifyingPayoutId, setNotifyingPayoutId] = useState<number | null>(null);
@@ -448,8 +472,9 @@ export default function AdminDashboard() {
       const data: CreatorEarnings = await api(`/users/${u.id}/earnings`);
       // Abaikan respons kalau panel sudah ditutup / pindah ke kreator lain.
       setEarningsPanel((p) => (p && p.user.id === u.id ? { user: u, data, error: "" } : p));
+      // Default: bulan tertua yang belum dibayar, supaya dibayar berurutan.
       setPayoutForm({
-        amount: data.outstanding_usd > 0 ? data.outstanding_usd.toFixed(2) : "",
+        period_month: payableMonths(data.months)[0]?.month ?? "",
         note: "",
         paid_at: todayIso(),
       });
@@ -473,9 +498,10 @@ export default function AdminDashboard() {
     try {
       const data = await api("/payouts", {
         method: "POST",
+        // Jumlah tidak dikirim: dihitung backend dari bagian kreator bulan itu.
         body: JSON.stringify({
           user_id: user.id,
-          amount_usd: Number(payoutForm.amount),
+          period_month: payoutForm.period_month,
           note: payoutForm.note.trim() || null,
           paid_at: payoutForm.paid_at || null,
         }),
@@ -510,8 +536,10 @@ export default function AdminDashboard() {
     if (!earningsPanel) return;
     if (
       !confirm(
-        `Hapus payout ${formatUsd(p.amount_usd)} tanggal ${formatDate(p.paid_at)}?\n\n` +
-          "Gunakan hanya untuk koreksi salah input. Saldo tertunda kreator akan bertambah lagi."
+        `Hapus payout ${p.period_month ? `${formatMonth(p.period_month)} ` : ""}` +
+          `${formatUsd(p.amount_usd)} tanggal ${formatDate(p.paid_at)}?\n\n` +
+          "Gunakan hanya untuk koreksi salah input. Saldo tertunda kreator akan bertambah lagi" +
+          (p.period_month ? " dan bulan itu bisa dicatat ulang." : ".")
       )
     )
       return;
@@ -648,11 +676,13 @@ export default function AdminDashboard() {
     : (report?.totals ?? null);
 
   const earningsData = earningsPanel?.data ?? null;
+  const periodOptions = earningsData ? payableMonths(earningsData.months) : [];
+  const selectedPeriod = periodOptions.find((m) => m.month === payoutForm.period_month) ?? null;
   // Sama dengan syarat POST /payouts di backend.
   const canRecordPayout =
     !!earningsData?.payout_method &&
     earningsPanel?.user.account_status === "Active" &&
-    earningsData.outstanding_usd > 0;
+    periodOptions.length > 0;
 
   if (loading)
     return (
@@ -1397,21 +1427,51 @@ export default function AdminDashboard() {
                   className="rounded-2xl border border-blue-100 bg-blue-50/40 p-4 space-y-3"
                 >
                   <h4 className="text-sm font-bold text-gray-800">Catat pembayaran</h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
                     <label className="block">
-                      <span className="text-xs font-bold text-gray-500 uppercase">Jumlah (USD)</span>
-                      <input
-                        type="number"
+                      <span className="text-xs font-bold text-gray-500 uppercase">Periode</span>
+                      <select
                         required
-                        min="0.01"
-                        max={earningsData.outstanding_usd > 0 ? earningsData.outstanding_usd : undefined}
-                        step="0.01"
                         disabled={!canRecordPayout}
-                        value={payoutForm.amount}
-                        onChange={(e) => setPayoutForm((f) => ({ ...f, amount: e.target.value }))}
+                        value={payoutForm.period_month}
+                        onChange={(e) => setPayoutForm((f) => ({ ...f, period_month: e.target.value }))}
                         className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 text-sm bg-white disabled:bg-gray-100"
-                      />
+                      >
+                        {periodOptions.length === 0 ? (
+                          <option value="">Tidak ada bulan yang bisa dibayar</option>
+                        ) : (
+                          periodOptions.map((m) => (
+                            <option key={m.month} value={m.month}>
+                              {periodOptionLabel(m)}
+                            </option>
+                          ))
+                        )}
+                      </select>
                     </label>
+                    {selectedPeriod && (
+                      <p className="mt-2 rounded-xl border border-blue-100 bg-white px-3 py-2 text-sm">
+                        <span className="text-gray-500">Akan dicatat: </span>
+                        <span className="font-black text-gray-900">{formatUsd(selectedPeriod.share_usd)}</span>
+                        {selectedPeriod.share_idr !== null && (
+                          <>
+                            <span className="text-gray-400"> · </span>
+                            <span className="font-black text-gray-900">
+                              {formatIDR(selectedPeriod.share_idr)}
+                            </span>
+                            <span className="text-xs text-gray-500">
+                              {" "}
+                              (kurs {formatIDR(earningsData.idr_rate)}/$)
+                            </span>
+                          </>
+                        )}
+                        <span className="block text-xs text-gray-500">
+                          Bagian kreator {formatMonth(selectedPeriod.month)} ·{" "}
+                          {selectedPeriod.units.toLocaleString("id-ID")} unit
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <label className="block">
                       <span className="text-xs font-bold text-gray-500 uppercase">Tanggal bayar</span>
                       <input
@@ -1436,8 +1496,10 @@ export default function AdminDashboard() {
                     </label>
                   </div>
                   <p className="text-xs text-gray-500">
-                    Default jumlah = saldo tertunda. Payout bank/e-wallet dicatat juga dalam rupiah
-                    dengan kurs {formatIDR(earningsData.idr_rate)}/$.
+                    Satu payout per bulan; jumlahnya dihitung otomatis dari bagian kreator di bulan
+                    itu. Hanya bulan yang sudah lengkap dan belum dibayar yang bisa dipilih (bulan
+                    berjalan belum). Payout bank/e-wallet dicatat juga dalam rupiah dengan kurs{" "}
+                    {formatIDR(earningsData.idr_rate)}/$.
                   </p>
                   {payoutPesan.text && (
                     <div
@@ -1461,6 +1523,7 @@ export default function AdminDashboard() {
                     <table className="w-full text-left text-sm">
                       <thead className="bg-gray-50">
                         <tr>
+                          <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Periode</th>
                           <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase">Tanggal</th>
                           <th className="px-4 py-2 text-xs font-bold text-gray-500 uppercase text-right">
                             Jumlah
@@ -1477,13 +1540,16 @@ export default function AdminDashboard() {
                       <tbody>
                         {earningsData.payouts.length === 0 ? (
                           <tr>
-                            <td colSpan={7} className="px-4 py-4 text-center text-gray-400 font-bold">
+                            <td colSpan={8} className="px-4 py-4 text-center text-gray-400 font-bold">
                               Belum ada payout.
                             </td>
                           </tr>
                         ) : (
                           earningsData.payouts.map((p) => (
                             <tr key={p.id} className="border-t border-gray-50 align-top">
+                              <td className="px-4 py-2 whitespace-nowrap font-bold text-gray-800">
+                                {p.period_month ? formatMonth(p.period_month) : "-"}
+                              </td>
                               <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
                               <td className="px-4 py-2 text-right font-black text-gray-900">
                                 {formatUsd(p.amount_usd)}
