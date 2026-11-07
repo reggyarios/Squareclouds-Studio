@@ -727,41 +727,19 @@ def test_payout_items_saved_and_sum_to_amount(client, admin_headers):
         content.name = "Konten A (baru)"
         db.query(models.CreatorSplit).update({models.CreatorSplit.split_percentage: 50})
         db.commit()
-    items = client.get(f"/payouts/{payout_id}", headers=admin_headers).json()["items"]
-    assert [(i["name"], i["share_usd"], i["split_pct"]) for i in items] == [
-        ("Konten A", 0.29, 30.0),
-        ("Konten B", 0.28, 30.0),
-    ]
-
-
-def test_get_payout_detail_access(client, admin_headers):
-    creator_id = seed_creator(method="bank", details=BANK)
-    payout_id = post_payout(client, admin_headers, creator_id, note="Oktober").json()["data"]["id"]
     with SessionLocal() as db:
-        add_creator(db, "lain@example.com", "Kreator Lain", username="lain")
-        db.commit()
-    url = f"/payouts/{payout_id}"
+        rows = [(i.content_name, i.share_usd, i.split_pct) for i in db.get(models.Payout, payout_id).items]
+        assert rows == [("Konten A", 0.29, 30.0), ("Konten B", 0.28, 30.0)]
 
-    admin_view = client.get(url, headers=admin_headers).json()
-    assert admin_view["period_month"] == "2026-10"
-    assert admin_view["details"] == BANK
-    assert admin_view["items"][0]["split_pct"] == 30.0
 
-    res = client.get(url, headers=login(client))
-    assert res.status_code == 200, res.text
-    owner_view = res.json()
-    assert owner_view["items"] == [
-        {"content_id": admin_view["items"][0]["content_id"], "name": "Royal Mansion", "units": 10, "share_usd": 22.8}
-    ]
-    assert owner_view["note"] == "Oktober"
-    leaked = [k for k in all_keys(owner_view) if any(part in k.lower() for part in FORBIDDEN_KEY_PARTS)]
-    assert leaked == []
-    assert "details" not in owner_view
-    assert BANK["account_number"] not in str(owner_view)
-
-    assert client.get(url, headers=login(client, "lain@example.com")).status_code == 403
-    assert client.get(url).status_code == 401
-    assert client.get("/payouts/999", headers=admin_headers).status_code == 404
+def test_payout_detail_and_pdf_endpoints_are_gone(client, admin_headers):
+    creator_id = seed_creator(method="bank", details=BANK)
+    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+    # Slip hanya dikirim lewat email (dan arsip Drive), tidak bisa diunduh.
+    # /payouts/{id} masih punya DELETE, jadi GET-nya 405; /pdf tidak ada sama sekali.
+    for headers in (admin_headers, login(client)):
+        assert client.get(f"/payouts/{payout_id}", headers=headers).status_code == 405
+        assert client.get(f"/payouts/{payout_id}/pdf", headers=headers).status_code == 404
 
 
 def test_deleting_payout_deletes_its_items(client, admin_headers):
@@ -1127,20 +1105,21 @@ def assert_no_internal_money(text):
     assert leaked == [], leaked
 
 
-def test_payout_pdf_for_owner_and_admin(client, admin_headers):
+def sent_slip(outbox):
+    """(nama file, teks PDF) slip yang dilampirkan di email terakhir."""
+    [(filename, data, mime_type)] = outbox[-1]["attachments"]
+    assert mime_type == "application/pdf"
+    assert data.startswith(b"%PDF")
+    return filename, pdf_text(data)
+
+
+def test_payout_slip_content(client, admin_headers, outbox):
     creator_id = seed_creator(method="bank", details=BANK)
     res = post_payout(client, admin_headers, creator_id, note="Terima kasih", paid_at="2026-11-03")
     payout_id = res.json()["data"]["id"]
-    url = f"/payouts/{payout_id}/pdf"
 
-    res = client.get(url, headers=login(client))
-    assert res.status_code == 200, res.text
-    assert res.headers["content-type"] == "application/pdf"
-    assert res.headers["content-disposition"] == 'attachment; filename="payout-squareclouds-kreator-2026-10.pdf"'
-    assert res.headers["cache-control"] == "no-store"
-    assert res.content.startswith(b"%PDF")
-
-    text = pdf_text(res.content)
+    filename, text = sent_slip(outbox)
+    assert filename == "payout-squareclouds-kreator-2026-10.pdf"
     for part in (
         # Kop
         "Created On: 3 November 2026",
@@ -1175,28 +1154,11 @@ def test_payout_pdf_for_owner_and_admin(client, admin_headers):
     assert_no_internal_money(text)
     assert BANK["account_number"] not in text
 
-    res = client.get(url, headers=admin_headers)
-    assert res.status_code == 200
-    assert res.headers["content-disposition"] == 'attachment; filename="payout-squareclouds-kreator-2026-10.pdf"'
 
-
-def test_payout_pdf_access(client, admin_headers):
-    creator_id = seed_creator(method="bank", details=BANK)
-    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
-    with SessionLocal() as db:
-        add_creator(db, "lain@example.com", "Kreator Lain", username="lain")
-        db.commit()
-    url = f"/payouts/{payout_id}/pdf"
-
-    assert client.get(url, headers=login(client, "lain@example.com")).status_code == 403
-    assert client.get(url).status_code == 401
-    assert client.get("/payouts/999/pdf", headers=admin_headers).status_code == 404
-
-
-def test_payout_pdf_paypal_has_no_rupiah(client, admin_headers):
+def test_payout_slip_paypal_has_no_rupiah(client, admin_headers, outbox):
     creator_id = seed_creator(method="paypal", details={"paypal_email": "kreator@gmail.com"})
-    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
-    text = pdf_text(client.get(f"/payouts/{payout_id}/pdf", headers=admin_headers).content)
+    post_payout(client, admin_headers, creator_id)
+    _, text = sent_slip(outbox)
     assert "PayPal kr***@gmail.com" in text
     assert "kreator@gmail.com" not in text
     assert "Total (USD)" in text
@@ -1205,17 +1167,16 @@ def test_payout_pdf_paypal_has_no_rupiah(client, admin_headers):
     assert_no_internal_money(text)
 
 
-def test_payout_pdf_for_legacy_payout_and_account_without_username(client, admin_headers):
+def test_payout_slip_for_legacy_payout_and_account_without_username(client, admin_headers, outbox):
     creator_id = seed_creator(method="bank", details=BANK, username=None)
     with SessionLocal() as db:
         payout_id = add_payout(db, db.get(models.User, creator_id), 5.0).id
         db.commit()
+    # Payout lama: slip dibuat saat kirim ulang email.
+    assert client.post(f"/payouts/{payout_id}/notify", headers=admin_headers).status_code == 200
 
-    res = client.get(f"/payouts/{payout_id}/pdf", headers=admin_headers)
-    assert res.status_code == 200
-    expected = f'attachment; filename="payout-squareclouds-user{creator_id}-PO-{payout_id:06d}.pdf"'
-    assert res.headers["content-disposition"] == expected
-    text = pdf_text(res.content)
+    filename, text = sent_slip(outbox)
+    assert filename == f"payout-squareclouds-user{creator_id}-PO-{payout_id:06d}.pdf"
     assert "Revenue Month: -" in text
     assert "No per-content breakdown is available for this payout." in text
     assert "$5.00" in text
@@ -1223,13 +1184,13 @@ def test_payout_pdf_for_legacy_payout_and_account_without_username(client, admin
     assert "@" not in text.replace("creator@example.com", "").replace("contact@squarecloudsmc.com", "")
 
 
-def test_payout_pdf_uses_company_address_setting(client, admin_headers):
-    creator_id = seed_creator(method="bank", details=BANK)
-    payout_id = post_payout(client, admin_headers, creator_id).json()["data"]["id"]
+def test_payout_slip_uses_company_address_setting(client, admin_headers, outbox):
     body = {"paypal_fee_pct": 5, "idr_rate": 16500, "company_address": "Jalan Baru No. 7\nMedan 20111"}
     assert client.put("/settings", json=body, headers=admin_headers).status_code == 200
+    creator_id = seed_creator(method="bank", details=BANK)
+    post_payout(client, admin_headers, creator_id)
 
-    text = pdf_text(client.get(f"/payouts/{payout_id}/pdf", headers=admin_headers).content)
+    _, text = sent_slip(outbox)
     assert "Jalan Baru No. 7" in text
     assert "Medan 20111" in text
     assert "Jalan Halat" not in text

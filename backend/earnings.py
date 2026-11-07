@@ -208,22 +208,6 @@ def serialize_payout(payout: models.Payout, include_internal: bool) -> dict:
     return item
 
 
-def serialize_payout_items(payout: models.Payout, include_internal: bool) -> list[dict]:
-    """Rincian per konten. split_pct hanya untuk admin (include_internal)."""
-    result = []
-    for row in payout.items:
-        item = {
-            "content_id": row.content_id,
-            "name": row.content_name,
-            "units": row.units,
-            "share_usd": money(row.share_usd),
-        }
-        if include_internal:
-            item["split_pct"] = row.split_pct
-        result.append(item)
-    return result
-
-
 def creator_summary(db: Session, user: models.User, include_internal: bool) -> dict:
     """Pendapatan, pembayaran, dan saldo tertunda satu kreator (USD, plus
     perkiraan rupiah kalau metode payout-nya bank/e-wallet).

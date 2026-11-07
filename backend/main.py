@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Response, status, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -116,8 +116,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    # Supaya frontend bisa membaca nama file slip PDF saat mengunduh.
-    expose_headers=["Content-Disposition"],
 )
 
 
@@ -1236,50 +1234,6 @@ def create_payout(
         "notified": notified,
         "data": earnings.serialize_payout(payout, include_internal=True),
     }
-
-
-def get_payout_or_error(db: Session, payout_id: int, current_user: models.User) -> models.Payout:
-    """Payout untuk admin, atau untuk kreator pemiliknya (kreator lain 403)."""
-    payout = db.get(models.Payout, payout_id)
-    if not payout:
-        raise HTTPException(status_code=404, detail="Payout tidak ditemukan")
-    if current_user.role != "Admin" and payout.user_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Akses ditolak.")
-    return payout
-
-
-@app.get("/payouts/{payout_id}")
-def get_payout_detail(
-    payout_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    payout = get_payout_or_error(db, payout_id, current_user)
-    # Kreator: tanpa snapshot tujuan, field admin, maupun split %.
-    internal = current_user.role == "Admin"
-    return {
-        **earnings.serialize_payout(payout, include_internal=internal),
-        "items": earnings.serialize_payout_items(payout, include_internal=internal),
-    }
-
-
-@app.get("/payouts/{payout_id}/pdf")
-def download_payout_slip(
-    payout_id: int,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(get_current_user),
-):
-    payout = get_payout_or_error(db, payout_id, current_user)
-    user = db.get(models.User, payout.user_id)
-    # Nama file hanya [a-z0-9_-.] (username tervalidasi), aman tanpa quoting lain.
-    return Response(
-        content=payout_slip_pdf(db, user, payout),
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="{payout_slip_filename(user, payout)}"',
-            "Cache-Control": "no-store",
-        },
-    )
 
 
 @app.post("/payouts/{payout_id}/notify")

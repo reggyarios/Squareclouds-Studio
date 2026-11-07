@@ -2,8 +2,8 @@
 
 import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { PayoutItemsDetail, PayoutItemsTable } from "@/components/portal/PayoutItems";
-import { apiDownload, apiFetch } from "@/lib/auth";
+import { PayoutItemsTable } from "@/components/portal/PayoutItems";
+import { apiFetch } from "@/lib/auth";
 import {
   JOB_OPTIONS,
   PAYOUT_FIELDS,
@@ -14,7 +14,6 @@ import {
   formatIDR,
   formatMonth,
   formatUsd,
-  payoutSlipFallbackName,
 } from "@/lib/portal";
 
 type Tab = "undangan" | "kreator" | "konten" | "laporan" | "pengaturan";
@@ -248,9 +247,6 @@ export default function AdminDashboard() {
   const [savingPayout, setSavingPayout] = useState(false);
   const [deletingPayoutId, setDeletingPayoutId] = useState<number | null>(null);
   const [notifyingPayoutId, setNotifyingPayoutId] = useState<number | null>(null);
-  // Baris riwayat payout yang rinciannya sedang dibuka.
-  const [expandedPayoutId, setExpandedPayoutId] = useState<number | null>(null);
-  const [downloadingPayoutId, setDownloadingPayoutId] = useState<number | null>(null);
   const [payoutPesan, setPayoutPesan] = useState({ type: "", text: "" });
 
   const [pesan, setPesan] = useState({ type: "", text: "" });
@@ -502,7 +498,6 @@ export default function AdminDashboard() {
   const openEarnings = (u: Creator) => {
     setEarningsPanel({ user: u, data: null, error: "" });
     setPayoutPesan({ type: "", text: "" });
-    setExpandedPayoutId(null);
     loadEarnings(u);
   };
 
@@ -546,18 +541,6 @@ export default function AdminDashboard() {
       setPayoutPesan({ type: "error", text: errMsg(err) });
     } finally {
       setNotifyingPayoutId(null);
-    }
-  };
-
-  const handleDownloadPayoutPdf = async (p: Payout) => {
-    setDownloadingPayoutId(p.id);
-    setPayoutPesan({ type: "", text: "" });
-    try {
-      await apiDownload(`/payouts/${p.id}/pdf`, payoutSlipFallbackName(p.id), handleLogout);
-    } catch (err) {
-      setPayoutPesan({ type: "error", text: errMsg(err) });
-    } finally {
-      setDownloadingPayoutId(null);
     }
   };
 
@@ -1325,8 +1308,8 @@ export default function AdminDashboard() {
                 />
                 <span className="mt-1 block text-xs text-gray-500">
                   Tampil di blok pengirim slip PDF, di bawah nama dan email Squareclouds Studio. Satu
-                  baris per baris alamat, maksimal 5 baris. Berlaku juga untuk slip lama yang diunduh
-                  ulang.
+                  baris per baris alamat, maksimal 5 baris. Berlaku untuk slip yang dibuat sesudah
+                  disimpan (payout baru, kirim ulang email, upload ulang ke Drive).
                 </span>
               </label>
               <button
@@ -1584,104 +1567,72 @@ export default function AdminDashboard() {
                           </tr>
                         ) : (
                           earningsData.payouts.map((p) => (
-                            <Fragment key={p.id}>
-                              <tr className="border-t border-gray-50 align-top">
-                                <td className="px-4 py-2 whitespace-nowrap font-bold text-gray-800">
-                                  {p.period_month ? formatMonth(p.period_month) : "-"}
-                                </td>
-                                <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
-                                <td className="px-4 py-2 text-right font-black text-gray-900">
-                                  {formatUsd(p.amount_usd)}
-                                </td>
-                                <td className="px-4 py-2 text-right whitespace-nowrap">
-                                  {p.amount_idr !== null ? (
-                                    <>
-                                      {formatIDR(p.amount_idr)}
-                                      {p.idr_rate !== null && (
-                                        <span className="block text-xs text-gray-400">
-                                          kurs {formatIDR(p.idr_rate)}/$
-                                        </span>
-                                      )}
-                                    </>
-                                  ) : (
-                                    "-"
-                                  )}
-                                </td>
-                                <td className="px-4 py-2">
-                                  <span className="font-bold">
-                                    {PAYOUT_METHOD_LABEL[p.method] || p.method}
-                                  </span>
-                                  <span className="block text-xs text-gray-500 break-all">
-                                    {payoutDetailsText(p.method, p.details)}
-                                  </span>
-                                </td>
-                                <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
-                                <td className="px-4 py-2">
-                                  {p.notified_at ? (
-                                    <span
-                                      title={`Terkirim ${formatDateTime(p.notified_at)}`}
-                                      className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700"
-                                    >
-                                      ✓ Email terkirim
-                                    </span>
-                                  ) : (
-                                    <div className="flex flex-col items-start gap-1">
-                                      <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
-                                        ✕ Email gagal
+                            <tr key={p.id} className="border-t border-gray-50 align-top">
+                              <td className="px-4 py-2 whitespace-nowrap font-bold text-gray-800">
+                                {p.period_month ? formatMonth(p.period_month) : "-"}
+                              </td>
+                              <td className="px-4 py-2 whitespace-nowrap">{formatDate(p.paid_at)}</td>
+                              <td className="px-4 py-2 text-right font-black text-gray-900">
+                                {formatUsd(p.amount_usd)}
+                              </td>
+                              <td className="px-4 py-2 text-right whitespace-nowrap">
+                                {p.amount_idr !== null ? (
+                                  <>
+                                    {formatIDR(p.amount_idr)}
+                                    {p.idr_rate !== null && (
+                                      <span className="block text-xs text-gray-400">
+                                        kurs {formatIDR(p.idr_rate)}/$
                                       </span>
-                                      <button
-                                        type="button"
-                                        onClick={() => handleResendPayoutEmail(p)}
-                                        disabled={notifyingPayoutId !== null}
-                                        className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
-                                      >
-                                        {notifyingPayoutId === p.id ? "Mengirim..." : "Kirim ulang email"}
-                                      </button>
-                                    </div>
-                                  )}
-                                </td>
-                                <td className="px-4 py-2">
-                                  {/* Ditumpuk supaya tabel tetap muat di modal. */}
-                                <div className="flex flex-col items-stretch gap-1.5">
+                                    )}
+                                  </>
+                                ) : (
+                                  "-"
+                                )}
+                              </td>
+                              <td className="px-4 py-2">
+                                <span className="font-bold">
+                                  {PAYOUT_METHOD_LABEL[p.method] || p.method}
+                                </span>
+                                <span className="block text-xs text-gray-500 break-all">
+                                  {payoutDetailsText(p.method, p.details)}
+                                </span>
+                              </td>
+                              <td className="px-4 py-2 text-gray-600">{p.note || "-"}</td>
+                              <td className="px-4 py-2">
+                                {p.notified_at ? (
+                                  <span
+                                    title={`Terkirim ${formatDateTime(p.notified_at)}`}
+                                    className="whitespace-nowrap rounded bg-green-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-green-700"
+                                  >
+                                    ✓ Email terkirim
+                                  </span>
+                                ) : (
+                                  <div className="flex flex-col items-start gap-1">
+                                    <span className="whitespace-nowrap rounded bg-red-100 px-2 py-1 text-[10px] font-black uppercase tracking-wider text-red-600">
+                                      ✕ Email gagal
+                                    </span>
                                     <button
                                       type="button"
-                                      aria-expanded={expandedPayoutId === p.id}
-                                      onClick={() =>
-                                        setExpandedPayoutId((id) => (id === p.id ? null : p.id))
-                                      }
-                                      className="whitespace-nowrap bg-gray-100 text-gray-700 px-3 py-1 rounded-lg text-xs font-bold hover:bg-gray-200"
+                                      onClick={() => handleResendPayoutEmail(p)}
+                                      disabled={notifyingPayoutId !== null}
+                                      className="whitespace-nowrap text-xs font-bold text-blue-600 hover:underline disabled:opacity-50"
                                     >
-                                      {expandedPayoutId === p.id ? "Rincian ▴" : "Rincian ▾"}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDownloadPayoutPdf(p)}
-                                      disabled={downloadingPayoutId !== null}
-                                      className="whitespace-nowrap bg-blue-50 text-blue-600 px-3 py-1 rounded-lg text-xs font-bold hover:bg-blue-100 disabled:opacity-50"
-                                    >
-                                      {downloadingPayoutId === p.id ? "Mengunduh..." : "PDF"}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeletePayout(p)}
-                                      disabled={deletingPayoutId !== null}
-                                      className="bg-red-50 text-red-600 px-3 py-1 rounded-lg text-xs font-bold disabled:opacity-50"
-                                    >
-                                      {deletingPayoutId === p.id ? "Menghapus..." : "Hapus"}
+                                      {notifyingPayoutId === p.id ? "Mengirim..." : "Kirim ulang email"}
                                     </button>
                                   </div>
-                                </td>
-                              </tr>
-                              {expandedPayoutId === p.id && (
-                                <tr className="bg-gray-50/60">
-                                  <td colSpan={8} className="px-4 py-3">
-                                    <div className="max-w-lg">
-                                      <PayoutItemsDetail payoutId={p.id} api={api} />
-                                    </div>
-                                  </td>
-                                </tr>
-                              )}
-                            </Fragment>
+                                )}
+                              </td>
+                              <td className="px-4 py-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeletePayout(p)}
+                                  disabled={deletingPayoutId !== null}
+                                  className="bg-red-50 text-red-600 px-3 py-1 rounded-lg text-xs font-bold disabled:opacity-50"
+                                >
+                                  {deletingPayoutId === p.id ? "Menghapus..." : "Hapus"}
+                                </button>
+                              </td>
+                            </tr>
                           ))
                         )}
                       </tbody>

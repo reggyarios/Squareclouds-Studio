@@ -32,19 +32,13 @@ export const EWALLET_PROVIDERS = ["DANA", "GoPay", "OVO", "ShopeePay"];
 // versi termask-nya, jadi harus diisi ulang saat mengubah data payout.
 export const MASKED_PAYOUT_FIELDS = ["paypal_email", "account_number", "phone"];
 
-// Rincian payout per konten (GET /payouts/{id}, dan `items` di months).
-// split_pct hanya ada di respons admin.
+// Rincian per konten satu bulan (`months[].items` di GET /users/{id}/earnings).
 export type PayoutItem = {
   content_id: number;
   name: string;
   units: number;
   share_usd: number;
-  split_pct?: number;
 };
-
-// Fallback nama file slip kalau header Content-Disposition tidak terbaca.
-export const payoutSlipFallbackName = (payoutId: number) =>
-  `payout-squareclouds-PO-${String(payoutId).padStart(6, "0")}.pdf`;
 
 // Format tampilan saja; semua angka uang dihitung di backend/earnings.py.
 export const formatUsd = (n: number) =>
