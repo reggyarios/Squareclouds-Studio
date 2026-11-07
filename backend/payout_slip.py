@@ -31,11 +31,11 @@ NO_ITEMS = "No per-content breakdown is available for this payout."
 
 @dataclass
 class SlipData:
-    slip_no: str                        # "PO-000012"
+    title: str                          # judul dokumen PDF = nama file tanpa .pdf
     created_on: str                     # tanggal bayar, "3 November 2026"
     revenue_month: str                  # "Oktober 2026"; "-" untuk payout lama
     sender: list[str]                   # baris blok pengirim (kiri)
-    recipient: list[str]                # baris blok penerima (kanan); tujuan sudah termask
+    recipient: list[str]                # baris blok penerima (kanan): nama, username, email, tujuan termask
     items: list[tuple[str, str, str]]   # (konten, unit terjual, USD); kosong = payout lama
     total_units: str | None             # None kalau tidak ada rincian
     total_usd: str
@@ -55,7 +55,6 @@ BASE = ParagraphStyle("base", fontName="Helvetica", fontSize=9.5, leading=12, te
 BOLD = ParagraphStyle("bold", parent=BASE, fontName="Helvetica-Bold")
 RIGHT = ParagraphStyle("right", parent=BASE, alignment=TA_RIGHT)
 RIGHT_BOLD = ParagraphStyle("right_bold", parent=BOLD, alignment=TA_RIGHT)
-RIGHT_SMALL = ParagraphStyle("right_small", parent=RIGHT, fontSize=8.5, textColor=MUTED)
 MUTED_TEXT = ParagraphStyle("muted", parent=BASE, textColor=MUTED)
 HEADER_RIGHT = ParagraphStyle("header_right", parent=RIGHT_BOLD, fontSize=11, leading=15)
 COMPANY = ParagraphStyle("company", parent=BOLD, fontSize=16, leading=20)
@@ -83,7 +82,6 @@ def _header(data: SlipData) -> Table:
     right = [
         _p(f"Created On: {data.created_on}", HEADER_RIGHT),
         _p(f"Revenue Month: {data.revenue_month}", HEADER_RIGHT),
-        _p(f"Slip No. {data.slip_no}", RIGHT_SMALL),
     ]
     table = Table([[_logo(), right]], colWidths=[CONTENT_WIDTH * 0.55, CONTENT_WIDTH * 0.45])
     table.setStyle(TableStyle([
@@ -156,7 +154,7 @@ def render(data: SlipData) -> bytes:
         rightMargin=MARGIN,
         topMargin=MARGIN,
         bottomMargin=MARGIN + 4 * mm,
-        title=f"Payout Slip {data.slip_no}",
+        title=data.title,
         author="Squareclouds Studio",
         creator="Creator Portal Squareclouds Studio",
     )

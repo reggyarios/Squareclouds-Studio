@@ -973,31 +973,40 @@ SLIP_SENDER_NAME = "Squareclouds Studio"
 SLIP_SENDER_EMAIL = "contact@squarecloudsmc.com"
 
 
-def payout_slip_number(payout: models.Payout) -> str:
-    return f"PO-{payout.id:06d}"
+# Karakter yang tidak boleh ada di nama file (Windows paling ketat).
+UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|]')
 
 
 def payout_slip_filename(user: models.User, payout: models.Payout) -> str:
-    """payout-squareclouds-<username>-<YYYY-MM>.pdf; payout lama tanpa periode
-    memakai nomor slip, akun lama tanpa username memakai user<id>."""
-    who = user.username or f"user{user.id}"
-    return f"payout-squareclouds-{who}-{payout.period_month or payout_slip_number(payout)}.pdf"
+    """"Payout Slip - <username> - <Bulan Tahun>.pdf", mis. "Payout Slip -
+    cgartz - Agustus 2026.pdf". Akun lama tanpa username memakai nama; payout
+    lama tanpa periode memakai tanggal bayar."""
+    who = user.username or user.name
+    when = format_month_id(payout.period_month) if payout.period_month else format_date_id(payout.paid_at)
+    return UNSAFE_FILENAME_CHARS.sub("-", f"Payout Slip - {who} - {when}.pdf")
 
 
 def payout_slip_pdf(db: Session, user: models.User, payout: models.Payout) -> bytes:
-    # Hanya unit dan bagian kreator; gross/net/fee/split tidak pernah masuk slip.
+    """Slip PDF di memori (tidak pernah ditulis ke disk/DB); dibuat ulang tiap
+    kali dikirim: payout baru, kirim ulang email, upload ulang ke Drive.
+    Hanya unit dan bagian kreator; gross/net/fee/split tidak pernah masuk slip."""
     show_idr = payout_shows_idr(payout)
     items = payout.items
     return payout_slip.render(payout_slip.SlipData(
-        slip_no=payout_slip_number(payout),
+        title=payout_slip_filename(user, payout).removesuffix(".pdf"),
         created_on=format_date_id(payout.paid_at),
         revenue_month=format_month_id(payout.period_month) if payout.period_month else "-",
         sender=[SLIP_SENDER_NAME, SLIP_SENDER_EMAIL, *earnings.company_address(db).splitlines()],
+        # Baris username dilewati untuk akun lama tanpa username.
         recipient=[
-            user.name,
-            f"@{user.username} – Squareclouds Studio Creator" if user.username else "Squareclouds Studio Creator",
-            user.email,
-            payout_destination_text(payout.method, earnings.load_details(payout.details)),
+            line
+            for line in (
+                user.name,
+                user.username,
+                user.email,
+                payout_destination_text(payout.method, earnings.load_details(payout.details)),
+            )
+            if line
         ],
         items=[(i.content_name, format_count(i.units), earnings.format_usd(i.share_usd)) for i in items],
         total_units=format_count(sum(i.units for i in items)) if items else None,

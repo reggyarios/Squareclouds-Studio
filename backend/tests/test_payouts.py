@@ -970,7 +970,8 @@ def test_payout_email_without_period_for_legacy_payout(client, admin_headers, ou
     assert "Jumlah  : $5.00" in outbox[-1]["text"]
     # Slip tetap terlampir, dengan nomor slip di nama file (tanpa periode).
     [(filename, data, mime_type)] = outbox[-1]["attachments"]
-    assert (filename, mime_type) == (f"payout-squareclouds-kreator-PO-{payout_id:06d}.pdf", "application/pdf")
+    # Tanpa periode: tanggal bayar di nama file.
+    assert (filename, mime_type) == ("Payout Slip - kreator - 1 November 2026.pdf", "application/pdf")
     assert data.startswith(b"%PDF")
 
 
@@ -980,7 +981,7 @@ def test_payout_email_attaches_slip_and_lists_contents(client, admin_headers, ou
 
     mail = outbox[-1]
     [(filename, data, mime_type)] = mail["attachments"]
-    assert (filename, mime_type) == ("payout-squareclouds-kreator-2026-10.pdf", "application/pdf")
+    assert (filename, mime_type) == ("Payout Slip - kreator - Oktober 2026.pdf", "application/pdf")
     assert "Konten A" in pdf_text(data)
     assert (
         "Rincian per konten:\n"
@@ -1105,6 +1106,26 @@ def assert_no_internal_money(text):
     assert leaked == [], leaked
 
 
+SLIP_FOOTER = "This slip is generated automatically by Creator Portal Squareclouds Studio"
+
+
+def assert_consecutive_lines(text, expected):
+    """expected muncul berurutan sebagai baris utuh (pypdf kadang memberi spasi di depan baris)."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    windows = [lines[i:i + len(expected)] for i in range(len(lines))]
+    assert expected in windows, lines
+
+
+def assert_recipient_without_creator_label(text, username="kreator"):
+    """Tidak ada "@username" dan tidak ada "Creator" di slip, kecuali footer
+    "...by Creator Portal Squareclouds Studio" yang memang bagian layout."""
+    assert f"@{username}" not in text
+    assert "Squareclouds Studio Creator" not in text
+    body = [line for line in text.splitlines() if not line.startswith(SLIP_FOOTER)]
+    assert len(body) < len(text.splitlines()), "footer tidak ditemukan"
+    assert not [line for line in body if "Creator" in line], body
+
+
 def sent_slip(outbox):
     """(nama file, teks PDF) slip yang dilampirkan di email terakhir."""
     [(filename, data, mime_type)] = outbox[-1]["attachments"]
@@ -1119,12 +1140,11 @@ def test_payout_slip_content(client, admin_headers, outbox):
     payout_id = res.json()["data"]["id"]
 
     filename, text = sent_slip(outbox)
-    assert filename == "payout-squareclouds-kreator-2026-10.pdf"
+    assert filename == "Payout Slip - kreator - Oktober 2026.pdf"
     for part in (
         # Kop
         "Created On: 3 November 2026",
         "Revenue Month: Oktober 2026",
-        f"Slip No. PO-{payout_id:06d}",
         # Pengirim: nama, email, alamat dari settings.company_address
         "Squareclouds Studio",
         "contact@squarecloudsmc.com",
@@ -1132,8 +1152,6 @@ def test_payout_slip_content(client, admin_headers, outbox):
         "Kecamatan Medan Area, Kota Medan",
         "Sumatera Utara 20216",
         # Penerima
-        "Kreator",
-        "@kreator – Squareclouds Studio Creator",
         "creator@example.com",
         "Transfer bank BCA ****7890",
         # Tabel
@@ -1153,6 +1171,11 @@ def test_payout_slip_content(client, admin_headers, outbox):
         assert part in text, part
     assert_no_internal_money(text)
     assert BANK["account_number"] not in text
+    # Blok penerima: nama, username tanpa "@", email, tujuan termask.
+    assert_consecutive_lines(text, ["Kreator", "kreator", "creator@example.com", "Transfer bank BCA ****7890"])
+    assert_recipient_without_creator_label(text)
+    assert "Slip No." not in text
+    assert "PO-" not in text
 
 
 def test_payout_slip_paypal_has_no_rupiah(client, admin_headers, outbox):
@@ -1176,12 +1199,14 @@ def test_payout_slip_for_legacy_payout_and_account_without_username(client, admi
     assert client.post(f"/payouts/{payout_id}/notify", headers=admin_headers).status_code == 200
 
     filename, text = sent_slip(outbox)
-    assert filename == f"payout-squareclouds-user{creator_id}-PO-{payout_id:06d}.pdf"
+    # Tanpa username: nama; tanpa periode: tanggal bayar.
+    assert filename == "Payout Slip - Kreator - 1 November 2026.pdf"
     assert "Revenue Month: -" in text
     assert "No per-content breakdown is available for this payout." in text
     assert "$5.00" in text
-    assert "Squareclouds Studio Creator" in text
-    assert "@" not in text.replace("creator@example.com", "").replace("contact@squarecloudsmc.com", "")
+    # Baris username dilewati: nama langsung diikuti email.
+    assert_consecutive_lines(text, ["Kreator", "creator@example.com"])
+    assert_recipient_without_creator_label(text)
 
 
 def test_payout_slip_uses_company_address_setting(client, admin_headers, outbox):
@@ -1198,7 +1223,7 @@ def test_payout_slip_uses_company_address_setting(client, admin_headers, outbox)
 
 def slip_data(item_count, **overrides):
     data = dict(
-        slip_no="PO-000001", created_on="3 November 2026", revenue_month="Oktober 2026",
+        title="Payout Slip - kreator - Oktober 2026", created_on="3 November 2026", revenue_month="Oktober 2026",
         sender=["Squareclouds Studio"], recipient=["Kreator"],
         items=[(f"Konten {i:02d}", str(i), f"${i}.00") for i in range(1, item_count + 1)],
         total_units="1", total_usd="$1.00", exchange_rate="Rp16.500,00/$", total_idr="Rp16.500,00",
